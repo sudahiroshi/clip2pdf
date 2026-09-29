@@ -11,6 +11,7 @@ cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 TMP="$ROOT/tests/tmp"
 KEY2PDF="$ROOT/key2pdf"
+PDFTRIM="$ROOT/pdftrim"
 PASS=0; FAIL=0
 
 ok()   { PASS=$((PASS+1)); printf '  \033[32mok\033[0m   %s\n' "$1"; }
@@ -113,6 +114,46 @@ fails "範囲外のスライドは失敗する" "$KEY2PDF" -q -o "$TMP/e" --slid
 fails "--slide の書式不正は失敗する" "$KEY2PDF" -q -o "$TMP/e" --slide "a-b" "$TMP/fixture.pdf"
 fails "既存ファイルは上書きしない" "$KEY2PDF" -q -o "$TMP/out" "$TMP/fixture.pdf"
 check "--force なら上書きする" "$KEY2PDF" -q --force -o "$TMP/out" "$TMP/fixture.pdf"
+
+echo "pdftrim: PDF の余白削除"
+"$PDFTRIM" -q -o "$TMP/t/paper-crop.pdf" "$TMP/fixture.pdf"
+size_is "既定は全ページを個別に切り抜いて1本にまとめる(1p)" "$TMP/t/paper-crop.pdf" 0 240 120 2
+size_is "同(2p)" "$TMP/t/paper-crop.pdf" 1 100 300 2
+check "既定の出力名は <名前>-crop.pdf" bash -c '"$0" -q "$1" && test -f "$2"' "$PDFTRIM" "$TMP/fixture.pdf" "$TMP/fixture-crop.pdf"
+"$PDFTRIM" -q --uniform -o "$TMP/t/uni.pdf" "$TMP/fixture.pdf"
+U1=$(pagesize "$TMP/t/uni.pdf" 0); U2=$(pagesize "$TMP/t/uni.pdf" 1)
+check "--uniform は全ページ同じサイズ" test "$U1" = "$U2"
+size_is "--uniform は各ページの和になる" "$TMP/t/uni.pdf" 0 240 300 2
+"$PDFTRIM" -q --split -o "$TMP/t/sp" "$TMP/fixture.pdf"
+size_is "--split は1ページ1ファイル(1枚目)" "$TMP/t/sp/fixture-01.pdf" 0 240 120 2
+size_is "--split は1ページ1ファイル(2枚目)" "$TMP/t/sp/fixture-02.pdf" 0 100 300 2
+"$PDFTRIM" -q --pages 2 -o "$TMP/t/p2.pdf" "$TMP/fixture.pdf"
+size_is "--pages 2 は2ページ目だけ" "$TMP/t/p2.pdf" 0 100 300 2
+check "--pages 2 の出力は1ページ" test "$(pagecount "$TMP/t/p2.pdf")" = 1
+"$PDFTRIM" -q --margin 5 -o "$TMP/t/m.pdf" "$TMP/fixture.pdf"
+size_is "--margin 5 で縦横とも 10pt 大きい" "$TMP/t/m.pdf" 0 250 130 2
+
+echo "pdftrim: ゴミ取り (--noise)"
+cat > "$TMP/speck.tex" <<'TEX'
+\documentclass{article}
+\usepackage[paperwidth=720bp,paperheight=540bp,margin=100bp]{geometry}
+\pagestyle{empty}
+\begin{document}\noindent
+\rule{240bp}{120bp}\hspace{200bp}\rule{0.4bp}{0.4bp}
+\end{document}
+TEX
+(cd "$TMP" && pdflatex -interaction=batchmode speck.tex >/dev/null 2>&1)
+"$PDFTRIM" -q -o "$TMP/t/speck-raw.pdf" "$TMP/speck.pdf"
+SP=$(pagesize "$TMP/t/speck-raw.pdf"); SPW=${SP% *}
+if near "$SPW" 240 5; then ng "ゴミが既定で無視されてしまっている（${SPW}pt）"; else ok "既定ではゴミも内容として拾う（${SPW}pt）"; fi
+"$PDFTRIM" -q --noise 3 -o "$TMP/t/speck-clean.pdf" "$TMP/speck.pdf"
+size_is "--noise 3 でゴミを無視して図の実寸になる" "$TMP/t/speck-clean.pdf" 0 240 120 3
+
+echo "pdftrim: エラー処理"
+fails "PDF 以外は失敗する" "$PDFTRIM" -q "$TMP/fixture.tex"
+fails "入力と同じファイルへの出力は失敗する" "$PDFTRIM" -q -o "$TMP/fixture.pdf" "$TMP/fixture.pdf"
+fails "既存ファイルは上書きしない" "$PDFTRIM" -q -o "$TMP/t/m.pdf" "$TMP/fixture.pdf"
+check "--force なら上書きする" "$PDFTRIM" -q --force -o "$TMP/t/m.pdf" "$TMP/fixture.pdf"
 
 echo "TeX に貼れるか"
 cat > "$TMP/use.tex" <<'TEX'

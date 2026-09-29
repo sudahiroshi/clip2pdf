@@ -1,6 +1,32 @@
-# key2pdf
+# key2pdf / pdftrim
 
-Keynote のスライドを、**図の部分だけを切り出した PDF** に変換するコマンドです。
+余白のない図の PDF を作るコマンドが2つ入っています。
+
+| コマンド | 用途 |
+| --- | --- |
+| `key2pdf` | Keynote の `.key` から、スライドごとに**図の部分だけ**を切り出した PDF を作る |
+| `pdftrim` | できあいの **PDF の余白を落として**、内容にぴったりのページサイズにする |
+
+切り抜きの中身は `lib/crop.js` で共通です。
+
+## 必要なもの
+
+- macOS + Keynote（`key2pdf` が `.key` を書き出すのに使います。`pdftrim` には不要）
+- Node.js 18 以上（`node:util` の `parseArgs` を使います）
+- Ghostscript（`gs`）— 切り抜き範囲の検出に使います。MacTeX に同梱、または `brew install ghostscript`
+
+## 導入
+
+```sh
+git clone <this repo> ~/tako/key2pdf
+cd ~/tako/key2pdf && npm install                      # 依存は pdf-lib だけ
+ln -s ~/tako/key2pdf/key2pdf /usr/local/bin/key2pdf   # お好みで PATH へ
+ln -s ~/tako/key2pdf/pdftrim /usr/local/bin/pdftrim
+```
+
+## key2pdf
+
+Keynote のスライドを、**図の部分だけを切り出した PDF** に変換します。
 
 Keynote の書き出しは「スライド1枚 = 1ページ」なので、図の周りにスライドの余白が
 そのまま残ります。そのまま TeX に貼ると巨大な空白付きの図になってしまうので、
@@ -17,21 +43,7 @@ $ key2pdf figures.key
 \includegraphics[width=0.8\linewidth]{figures-01.pdf}
 ```
 
-## 必要なもの
-
-- macOS + Keynote（`.key` の書き出しに使います）
-- Node.js 18 以上（`node:util` の `parseArgs` を使います）
-- Ghostscript（`gs`）— 切り抜き範囲の検出に使います。MacTeX に同梱、または `brew install ghostscript`
-
-## 導入
-
-```sh
-git clone <this repo> ~/tako/key2pdf
-cd ~/tako/key2pdf && npm install                      # 依存は pdf-lib だけ
-ln -s ~/tako/key2pdf/key2pdf /usr/local/bin/key2pdf   # お好みで PATH へ
-```
-
-## 使い方
+### 使い方
 
 ```
 key2pdf [オプション] <file.key | file.pdf>
@@ -46,6 +58,7 @@ key2pdf [オプション] <file.key | file.pdf>
 | `--dpi N` | 切り抜き範囲を調べるときのラスタ解像度（既定: 150） |
 | `--bg auto\|#RRGGBB\|none` | 背景色。`auto` は四隅から推定、`none` で切り抜きなし |
 | `--tolerance N` | 背景とみなす色差 0–255（既定: 8） |
+| `--noise N` | 差分画素が N 個以下の行・列は無視する（既定: 0） |
 | `--merge` | 複数ページの PDF 1本にまとめる |
 | `--force` | 既存ファイルを上書きする |
 | `--keep-uncropped` | 切り抜き前の PDF も残す（デバッグ用） |
@@ -60,9 +73,42 @@ key2pdf -o ~/paper/fig --prefix energy figures.key
 key2pdf slides.pdf                         # 書き出し済み PDF の切り抜きだけ
 ```
 
+## pdftrim
+
+PDF の余白を落とします。`pdfcrop` と違い、**塗られた白い背景矩形を内容とみなしません**。
+
+```
+pdftrim [オプション] <file.pdf>
+```
+
+| オプション | 説明 |
+| --- | --- |
+| `-o, --output PATH` | 出力先。`--split` なしはファイル、ありはディレクトリ（既定: `<名前>-crop.pdf`） |
+| `--pages SPEC` | 対象ページ。例 `1,3-5`（既定: 全部） |
+| `--split` | ページごとに別ファイルへ書き出す |
+| `--uniform` | 全ページを共通の矩形（各ページの和）で切り抜き、ページサイズを揃える |
+| `--margin PT` | 切り抜きに残す余白 pt（既定: 0） |
+| `--dpi N` | 余白判定のラスタ解像度（既定: 150） |
+| `--bg auto\|#RRGGBB` | 背景色（既定: `auto` = 四隅から推定） |
+| `--tolerance N` | 背景とみなす色差 0–255（既定: 8） |
+| `--noise N` | 差分画素が N 個以下の行・列は無視する（既定: 0。スキャンのゴミ対策） |
+| `--force` | 既存ファイルを上書きする |
+| `-v` / `-q` | 詳細表示 / 進捗を出さない |
+
+```sh
+pdftrim paper.pdf                  # → paper-crop.pdf
+pdftrim --margin 5 slides.pdf      # 周囲に 5pt 残す
+pdftrim --uniform scan.pdf         # 全ページ同じサイズに揃える
+pdftrim --split figures.pdf        # → figures-01.pdf, figures-02.pdf …
+pdftrim --noise 3 --tolerance 20 scan.pdf   # スキャンの地色とゴミを無視する
+```
+
+既定ではページごとに個別の矩形で切り抜いて1本の PDF にまとめます。ページサイズを
+揃えたいときは `--uniform` を使ってください。
+
 ## 仕組み
 
-1. AppleScript（JXA）で Keynote に PDF を書き出させる
+1. （key2pdf のみ）AppleScript（JXA）で Keynote に PDF を書き出させる
 2. Ghostscript で1ページずつラスタ化し、**背景色と異なる画素**の範囲を求める
 3. [pdf-lib](https://pdf-lib.js.org/) でページの `MediaBox` / `CropBox` をその範囲に付け替える
 
@@ -73,6 +119,8 @@ key2pdf slides.pdf                         # 書き出し済み PDF の切り抜
 まったく切り詰められないためです。
 
 ## 注意
+
+以下のうち Keynote に関する項目は `key2pdf` のみに当てはまります。
 
 - **Keynote の GUI が起動します。** ヘッドレス実行や ssh 越しの実行はできません。
   初回は「システム設定 > プライバシーとセキュリティ > オートメーション」で、
@@ -95,8 +143,9 @@ key2pdf slides.pdf                         # 書き出し済み PDF の切り抜
 npm test          # = ./tests/run_tests.sh
 ```
 
-既知の寸法の PDF を `pdflatex` で作り、切り抜き結果の実寸・`--margin`・`--slide`・
-`--merge`・エラー処理・`\includegraphics` の通りを検証します（Keynote は起動しません）。
+既知の寸法の PDF を `pdflatex` で作り、両コマンドの切り抜き結果の実寸・`--margin`・
+`--slide` / `--pages`・`--merge` / `--split` / `--uniform`・`--noise`・エラー処理・
+`\includegraphics` の通りを検証します（Keynote は起動しません）。
 
 Keynote からの書き出しを含む通し確認も行うなら、`--with-keynote` を付けます
 （Keynote が起動し、サンプル書類を作って変換まで通します）。

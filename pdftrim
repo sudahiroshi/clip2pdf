@@ -1,0 +1,177 @@
+#!/usr/bin/env node
+// tako:run: ./pdftrim --help
+//
+// pdftrim — PDF の余白を落として、内容にぴったり合ったページサイズにする。
+//
+// ページをラスタ化して「背景色と異なる画素」の範囲を求め、ページ矩形
+// (MediaBox/CropBox)をそこまで切り詰める。内容は再エンコードしないのでベクタのまま。
+// 切り抜きの中身は lib/crop.js にあり、Keynote を扱う key2pdf と共通。
+
+'use strict';
+
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { parseArgs } = require('node:util');
+const { PDFDocument } = require('pdf-lib');
+const crop = require('./lib/crop');
+
+const PROG = 'pdftrim';
+const { info, debug, die } = crop;
+
+const USAGE = `使い方: ${PROG} [オプション] <file.pdf>
+
+PDF の余白を落として、内容にぴったり合ったページサイズにする
+（Keynote の .key から図を切り出すときは key2pdf を使ってください）
+
+オプション:
+  -o, --output PATH   出力先。--split なしはファイル、--split ありはディレクトリ
+                      （既定: 入力と同じ場所の <名前>-crop.pdf）
+      --pages SPEC    対象ページ。例: 1,3-5（既定: 全部）
+      --split         ページごとに別ファイルへ書き出す
+      --uniform       全ページを共通の矩形（各ページの和）で切り抜き、ページサイズを揃える
+      --margin PT     切り抜きに残す余白 pt（既定: 0）
+      --dpi N         余白判定のラスタ解像度（既定: 150）
+      --bg SPEC       背景色 auto|#RRGGBB（既定: auto = 四隅から推定）
+      --tolerance N   背景とみなす色差 0-255（既定: 8）
+      --noise N       差分画素が N 個以下の行・列は無視する（既定: 0。スキャンのゴミ対策）
+      --force         既存ファイルを上書きする
+  -v, --verbose       詳細を表示する
+  -q, --quiet         進捗を表示しない
+  -h, --help          この使い方を表示する
+
+例:
+  ${PROG} paper.pdf                  → paper-crop.pdf
+  ${PROG} --margin 5 slides.pdf      → 周囲に 5pt 残す
+  ${PROG} --uniform scan.pdf         → 全ページ同じサイズに揃える
+  ${PROG} --split figures.pdf        → figures-01.pdf, figures-02.pdf …
+  ${PROG} --noise 3 --tolerance 20 scan.pdf   → スキャンの地色とゴミを無視する
+`;
+
+function parseCli(argv) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args: argv,
+      allowPositionals: true,
+      options: {
+        output: { type: 'string', short: 'o' },
+        pages: { type: 'string', default: '' },
+        split: { type: 'boolean', default: false },
+        uniform: { type: 'boolean', default: false },
+        margin: { type: 'string', default: '0' },
+        dpi: { type: 'string', default: '150' },
+        bg: { type: 'string', default: 'auto' },
+        tolerance: { type: 'string', default: '8' },
+        noise: { type: 'string', default: '0' },
+        force: { type: 'boolean', default: false },
+        verbose: { type: 'boolean', short: 'v', default: false },
+        quiet: { type: 'boolean', short: 'q', default: false },
+        help: { type: 'boolean', short: 'h', default: false },
+      },
+    });
+  } catch (e) {
+    die(`${e.message}\n\n${USAGE}`);
+  }
+  const { values: v, positionals } = parsed;
+  if (v.help) { process.stdout.write(USAGE); process.exit(0); }
+  if (positionals.length === 0) die(`余白を落とす PDF を指定してください。\n\n${USAGE}`);
+  if (positionals.length > 1) die(`入力は1つだけ指定してください: ${positionals.join(', ')}`);
+  return {
+    input: positionals[0],
+    output: v.output,
+    pages: v.pages,
+    split: v.split,
+    uniform: v.uniform,
+    margin: crop.num(v.margin, '--margin'),
+    dpi: crop.num(v.dpi, '--dpi', { int: true, min: 12, max: 2400 }),
+    bg: v.bg,
+    tolerance: crop.num(v.tolerance, '--tolerance', { int: true, min: 0, max: 255 }),
+    noise: crop.num(v.noise, '--noise', { int: true, min: 0 }),
+    force: v.force,
+    verbose: v.verbose,
+    quiet: v.quiet,
+  };
+}
+
+async function main() {
+  const args = parseCli(process.argv.slice(2));
+  crop.configure({ prog: PROG, verbose: args.verbose, quiet: args.quiet });
+
+  let src = path.resolve(crop.expandHome(args.input));
+  if (!fs.existsSync(src)) die(`入力ファイルがありません: ${src}`);
+  src = fs.realpathSync(src);
+  if (path.extname(src).toLowerCase() !== '.pdf') {
+    die(`PDF を指定してください: ${path.basename(src)}`);
+  }
+
+  const stem = path.basename(src, path.extname(src));
+  const bg = crop.parseBg(args.bg);
+  const gs = crop.findGs();
+
+  const tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), 'pdftrim-'));
+  try {
+    const srcDoc = await PDFDocument.load(fs.readFileSync(src), { updateMetadata: false });
+    const total = srcDoc.getPageCount();
+    const pageNos = crop.parsePageSpec(args.pages, total, '--pages');
+    debug(`全 ${total} ページ中 ${pageNos.length} ページを処理`);
+
+    const results = pageNos.map((pageNo) => ({
+      pageNo,
+      box: crop.detectCropBox({
+        gs, pdf: src, page: srcDoc.getPage(pageNo - 1), pageNo, tmpdir,
+        dpi: args.dpi, margin: args.margin, bg,
+        tolerance: args.tolerance, noise: args.noise,
+      }),
+    }));
+
+    if (args.uniform) {
+      const box = crop.unionBoxes(results.map((r) => r.box));
+      if (box) {
+        debug(`共通の矩形: ${box.width.toFixed(1)}x${box.height.toFixed(1)}pt`);
+        for (const r of results) r.box = box;
+      }
+    }
+
+    let targets;
+    if (args.split) {
+      const dir = args.output ? path.resolve(crop.expandHome(args.output)) : path.dirname(src);
+      fs.mkdirSync(dir, { recursive: true });
+      const width = Math.max(2, String(Math.max(...results.map((r) => r.pageNo))).length);
+      targets = results.map((r) => ({
+        file: path.join(dir, `${stem}-${String(r.pageNo).padStart(width, '0')}.pdf`),
+        items: [r],
+      }));
+    } else {
+      let file;
+      if (args.output) {
+        const out = path.resolve(crop.expandHome(args.output));
+        // ディレクトリを渡されたらその中に既定名で置く
+        file = (fs.existsSync(out) && fs.statSync(out).isDirectory())
+          ? path.join(out, `${stem}-crop.pdf`) : out;
+      } else {
+        file = path.join(path.dirname(src), `${stem}-crop.pdf`);
+      }
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      targets = [{ file, items: results }];
+    }
+
+    if (targets.some((t) => path.resolve(t.file) === src)) {
+      die('入力と同じファイルには書き出せません。-o で別の名前を指定してください');
+    }
+    // 一部だけ書いて止まらないよう、書き始める前にまとめて確認する
+    if (!args.force) {
+      const clash = targets.find((t) => fs.existsSync(t.file));
+      if (clash) die(`すでに存在します: ${clash.file}（上書きするなら --force）`);
+    }
+
+    for (const { file, items } of targets) {
+      await crop.writePdf(srcDoc, items, file);
+      info(file);
+    }
+  } finally {
+    fs.rmSync(tmpdir, { recursive: true, force: true });
+  }
+}
+
+main().catch((e) => die(e && e.stack ? e.stack : String(e)));
