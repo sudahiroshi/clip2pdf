@@ -42,8 +42,8 @@ const JXA_EXPORT = `
 function run(argv) {
   var srcPath = argv[0], dstPath = argv[1];
   var kn = Application("Keynote");
-  var sys = Application.currentApplication();
-  sys.includeStandardAdditions = true;
+  ObjC.import("Foundation");
+  function sleep(sec) { $.NSThread.sleepForTimeInterval(sec); }
 
   // file() は環境によって Path("/x/y.key") のような表記で返るため、パス部分だけ取り出す
   function normPath(v) {
@@ -64,12 +64,14 @@ function run(argv) {
   var doc = findDoc();
   var wasOpen = doc !== null;
   if (!doc) {
-    kn.open(Path(srcPath));
+    var opened = kn.open(Path(srcPath));
     // 開き終わるまで待つ。documents[0] は別の書類を指すことがあるので必ずパスで特定する
     for (var t = 0; t < 100 && !doc; t++) {
       doc = findDoc();
-      if (!doc) { sys.delay(0.1); }
+      if (!doc) { sleep(0.1); }
     }
+    // パスで見つからないときだけ open() の戻り値に頼る
+    if (!doc && opened) { try { opened.slides.length; doc = opened; } catch (e) {} }
     if (!doc) { throw new Error("開いた書類を特定できませんでした: " + srcPath); }
   }
   var count = doc.slides.length;
