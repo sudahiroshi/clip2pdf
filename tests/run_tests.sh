@@ -26,18 +26,32 @@ fails() { # fails <説明> <コマンド...> : 失敗を期待する
 
 # 出力 PDF の MediaBox 実寸 "幅 高さ" を返す
 pagesize() {
-  /usr/bin/python3 -c '
-import sys
-sys.path.insert(0, "")
-from pypdf import PdfReader
-b = PdfReader(sys.argv[1]).pages[int(sys.argv[2])].mediabox
-print("%.2f %.2f" % (float(b.right)-float(b.left), float(b.top)-float(b.bottom)))
+  node -e '
+const { PDFDocument } = require("pdf-lib");
+const fs = require("node:fs");
+(async () => {
+  const doc = await PDFDocument.load(fs.readFileSync(process.argv[1]));
+  const b = doc.getPage(Number(process.argv[2] || 0)).getMediaBox();
+  console.log(b.width.toFixed(2) + " " + b.height.toFixed(2));
+})();
 ' "$1" "${2:-0}"
+}
+
+# 出力 PDF のページ数を返す
+pagecount() {
+  node -e '
+const { PDFDocument } = require("pdf-lib");
+const fs = require("node:fs");
+(async () => {
+  const doc = await PDFDocument.load(fs.readFileSync(process.argv[1]));
+  console.log(doc.getPageCount());
+})();
+' "$1"
 }
 
 # near <実測> <期待> <許容> : 数値が期待値の許容範囲内か
 near() {
-  /usr/bin/python3 -c 'import sys; sys.exit(0 if abs(float(sys.argv[1])-float(sys.argv[2]))<=float(sys.argv[3]) else 1)' "$1" "$2" "$3"
+  awk -v a="$1" -v b="$2" -v t="$3" 'BEGIN { d = a - b; if (d < 0) d = -d; exit !(d <= t) }'
 }
 
 size_is() { # size_is <説明> <pdf> <ページ> <期待幅> <期待高> <許容>
@@ -75,7 +89,7 @@ echo "基本の切り抜き"
 "$KEY2PDF" -q -o "$TMP/out" "$TMP/fixture.pdf"
 size_is "1枚目が矩形の実寸まで縮む" "$TMP/out/fixture-01.pdf" 0 240 120 2
 size_is "2枚目が矩形の実寸まで縮む" "$TMP/out/fixture-02.pdf" 0 100 300 2
-check "ページ数は1枚ずつ" test "$(/usr/bin/python3 -c 'from pypdf import PdfReader;print(len(PdfReader("'"$TMP"'/out/fixture-01.pdf").pages))')" = 1
+check "ページ数は1枚ずつ" test "$(pagecount "$TMP/out/fixture-01.pdf")" = 1
 
 echo "--margin"
 "$KEY2PDF" -q -o "$TMP/m" --margin 5 "$TMP/fixture.pdf"

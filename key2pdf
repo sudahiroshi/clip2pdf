@@ -1,75 +1,76 @@
-#!/usr/bin/env -S uv run --script
-# tako:run: ./key2pdf --help
-# /// script
-# requires-python = ">=3.9"
-# dependencies = ["pypdf>=4.0", "pillow>=9.0"]
-# ///
-"""key2pdf — Keynote のスライドから図の部分だけを切り出した PDF を作る。
+#!/usr/bin/env node
+// tako:run: ./key2pdf --help
+//
+// key2pdf — Keynote のスライドから図の部分だけを切り出した PDF を作る。
+//
+// Keynote の書き出しは「スライド1枚 = 1ページ」なので図の周りにスライドの余白が残る。
+// 本ツールはページを一度ラスタ化して「背景色と異なる画素」の範囲を求め、
+// ページ矩形(MediaBox/CropBox)をそこまで切り詰める。ページ内容は再エンコード
+// しないのでベクタのまま TeX の \includegraphics に貼れる。
 
-Keynote の書き出しは「スライド1枚 = 1ページ」なので図の周りにスライドの余白が残る。
-本ツールはページを一度ラスタ化して「背景色と異なる画素」の範囲を求め、
-ページ矩形(MediaBox/CropBox)をそこまで切り詰める。ページ内容は再エンコード
-しないのでベクタのまま TeX の \\includegraphics に貼れる。
-"""
+'use strict';
 
-import argparse
-import os
-import re
-import shutil
-import subprocess
-import sys
-import tempfile
-from pathlib import Path
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { execFileSync, spawnSync } = require('node:child_process');
+const { parseArgs } = require('node:util');
+const { PDFDocument, PDFName } = require('pdf-lib');
 
-PROG = "key2pdf"
-MAX_RASTER_PX = 8000  # ラスタ化時の1辺の上限。超えるなら dpi を自動で下げる
+const PROG = 'key2pdf';
+const MAX_RASTER_PX = 8000; // ラスタ化時の1辺の上限。超えるなら dpi を自動で下げる
 
-# ---------------------------------------------------------------- 出力
+// ---------------------------------------------------------------- 出力
 
+let VERBOSE = false;
+let QUIET = false;
 
-class Log:
-    def __init__(self, verbose=False, quiet=False):
-        self.verbose = verbose
-        self.quiet = quiet
+const info = (msg) => { if (!QUIET) process.stderr.write(`${msg}\n`); };
+const debug = (msg) => { if (VERBOSE && !QUIET) process.stderr.write(`  ${msg}\n`); };
+const warn = (msg) => process.stderr.write(`${PROG}: 警告: ${msg}\n`);
 
-    def info(self, msg):
-        if not self.quiet:
-            print(msg, file=sys.stderr)
+function die(msg) {
+  process.stderr.write(`${PROG}: エラー: ${msg}\n`);
+  process.exit(1);
+}
 
-    def debug(self, msg):
-        if self.verbose and not self.quiet:
-            print(f"  {msg}", file=sys.stderr)
+// ---------------------------------------------------------------- ① Keynote 書き出し
 
-    def warn(self, msg):
-        print(f"{PROG}: 警告: {msg}", file=sys.stderr)
-
-
-def die(msg, code=1):
-    print(f"{PROG}: エラー: {msg}", file=sys.stderr)
-    sys.exit(code)
-
-
-# ---------------------------------------------------------------- ① Keynote 書き出し
-
-# 引数を素直に渡せる JXA を使う。すでに開いている書類なら開き直さず、
-# こちらで開いた場合だけ閉じる（ユーザの作業中の書類を勝手に閉じないため）。
-JXA_EXPORT = r"""
+// 引数を素直に渡せる JXA を使う。すでに開いている書類なら開き直さず、
+// こちらで開いた場合だけ閉じる（ユーザの作業中の書類を勝手に閉じないため）。
+const JXA_EXPORT = `
 function run(argv) {
   var srcPath = argv[0], dstPath = argv[1];
   var kn = Application("Keynote");
-  var doc = null, wasOpen = false;
-  var docs = kn.documents;
-  for (var i = 0; i < docs.length; i++) {
-    var f = null;
-    try { f = docs[i].file(); } catch (e) {}
-    if (f && String(f).replace(/^Path\(/, "").replace(/\)$/, "") === srcPath) {
-      doc = docs[i]; wasOpen = true; break;
-    }
+  var sys = Application.currentApplication();
+  sys.includeStandardAdditions = true;
+
+  // file() は環境によって Path("/x/y.key") のような表記で返るため、パス部分だけ取り出す
+  function normPath(v) {
+    var s = String(v);
+    var m = /\\/.*$/.exec(s);
+    return m ? m[0].replace(/["')\\]]+$/, "") : s;
   }
+  function findDoc() {
+    var docs = kn.documents;
+    for (var i = 0; i < docs.length; i++) {
+      var f = null;
+      try { f = docs[i].file(); } catch (e) {}
+      if (f && normPath(f) === srcPath) { return docs[i]; }
+    }
+    return null;
+  }
+
+  var doc = findDoc();
+  var wasOpen = doc !== null;
   if (!doc) {
     kn.open(Path(srcPath));
-    doc = kn.documents[0];
-    if (!doc) { throw new Error("Keynote が書類を開けませんでした"); }
+    // 開き終わるまで待つ。documents[0] は別の書類を指すことがあるので必ずパスで特定する
+    for (var t = 0; t < 100 && !doc; t++) {
+      doc = findDoc();
+      if (!doc) { sys.delay(0.1); }
+    }
+    if (!doc) { throw new Error("開いた書類を特定できませんでした: " + srcPath); }
   }
   var count = doc.slides.length;
   kn.export(doc, {
@@ -85,272 +86,393 @@ function run(argv) {
   if (!wasOpen) { doc.close({ saving: "no" }); }
   return String(count);
 }
-"""
+`;
 
+// 書き出したスライド枚数を返す
+function exportKeynote(src, dst) {
+  debug(`Keynote で書き出し: ${path.basename(src)}`);
+  const res = spawnSync('osascript', ['-l', 'JavaScript', '-', src, dst], {
+    input: JXA_EXPORT, encoding: 'utf8',
+  });
+  if (res.error) die(`osascript を起動できませんでした: ${res.error.message}`);
+  if (res.status !== 0) {
+    const detail = (res.stderr || res.stdout || '').trim();
+    let hint = '';
+    if (detail.includes('-1743') || detail.includes('Not authorized')) {
+      hint = '\n  システム設定 > プライバシーとセキュリティ > オートメーション で、'
+           + 'ターミナルから Keynote を操作する許可を与えてください。';
+    }
+    die(`Keynote での書き出しに失敗しました。\n  ${detail}${hint}`);
+  }
+  if (!fs.existsSync(dst)) {
+    die('Keynote が PDF を出力しませんでした（パスワード保護された書類かもしれません）');
+  }
+  debug(`書き出し完了: ${dst}`);
+  const n = Number.parseInt((res.stdout || '').trim(), 10);
+  return Number.isFinite(n) ? n : null;
+}
 
-def export_keynote(src: Path, dst: Path, log: Log) -> None:
-    """Keynote に .key を PDF へ書き出させる。"""
-    log.debug(f"Keynote で書き出し: {src.name}")
-    proc = subprocess.run(
-        ["osascript", "-l", "JavaScript", "-", str(src), str(dst)],
-        input=JXA_EXPORT, capture_output=True, text=True,
-    )
-    if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout).strip()
-        hint = ""
-        if "-1743" in detail or "Not authorized" in detail:
-            hint = ("\n  システム設定 > プライバシーとセキュリティ > オートメーション で、"
-                    "ターミナルから Keynote を操作する許可を与えてください。")
-        die(f"Keynote での書き出しに失敗しました。\n  {detail}{hint}")
-    if not dst.exists():
-        die("Keynote が PDF を出力しませんでした（パスワード保護された書類かもしれません）")
-    log.debug(f"書き出し完了: {dst}")
+// ---------------------------------------------------------------- ② bbox 検出
 
+function findGs() {
+  for (const cand of ['gs', '/usr/local/bin/gs', '/opt/homebrew/bin/gs']) {
+    const r = spawnSync(cand, ['--version'], { encoding: 'utf8' });
+    if (!r.error && r.status === 0) return cand;
+  }
+  die('Ghostscript (gs) が見つかりません。`brew install ghostscript` などで導入してください。');
+}
 
-# ---------------------------------------------------------------- ② bbox 検出
+// gs にページを PPM(P6) で吐かせる。生の RGB なので依存なしで読める。
+function renderPage(gs, pdf, pageNo, dpi, outPpm) {
+  const args = [
+    '-q', '-dNOPAUSE', '-dBATCH', '-dSAFER',
+    '-sDEVICE=ppmraw', `-r${dpi}`,
+    `-dFirstPage=${pageNo}`, `-dLastPage=${pageNo}`,
+    '-dUseCropBox', '-dTextAlphaBits=4', '-dGraphicsAlphaBits=4',
+    `-sOutputFile=${outPpm}`, pdf,
+  ];
+  debug(`gs ${args.join(' ')}`);
+  const r = spawnSync(gs, args, { encoding: 'utf8' });
+  if (r.status !== 0 || !fs.existsSync(outPpm)) {
+    die(`ページ ${pageNo} のラスタ化に失敗しました。\n  ${(r.stderr || r.stdout || '').trim()}`);
+  }
+}
 
+// P6 ヘッダ（マジック・幅・高さ・最大値。間に空白とコメントを挟める）を読む
+function parsePpm(buf) {
+  let pos = 0;
+  const token = () => {
+    while (pos < buf.length) {
+      const c = buf[pos];
+      if (c === 0x23) { while (pos < buf.length && buf[pos] !== 0x0a) pos++; }
+      else if (c === 0x20 || c === 0x09 || c === 0x0a || c === 0x0d) pos++;
+      else break;
+    }
+    const start = pos;
+    while (pos < buf.length && ![0x20, 0x09, 0x0a, 0x0d].includes(buf[pos])) pos++;
+    return buf.toString('latin1', start, pos);
+  };
+  const magic = token();
+  if (magic !== 'P6') die(`ラスタ画像を読めませんでした（P6 ではなく ${magic}）`);
+  const width = parseInt(token(), 10);
+  const height = parseInt(token(), 10);
+  const maxval = parseInt(token(), 10);
+  if (maxval !== 255) die(`対応していない PPM です（maxval=${maxval}）`);
+  pos++; // ヘッダ直後の空白1文字
+  return { width, height, offset: pos };
+}
 
-def find_gs() -> str:
-    gs = shutil.which("gs") or ("/usr/local/bin/gs" if os.path.exists("/usr/local/bin/gs") else None)
-    if not gs:
-        die("Ghostscript (gs) が見つかりません。`brew install ghostscript` などで導入してください。")
-    return gs
+// 背景色と異なる画素の bbox を {left, upper, right, lower}（右下は排他）で返す。無地なら null。
+function detectBbox(ppmPath, bgSpec, tolerance) {
+  const buf = fs.readFileSync(ppmPath);
+  const { width, height, offset } = parsePpm(buf);
+  const at = (x, y) => {
+    const i = offset + (y * width + x) * 3;
+    return [buf[i], buf[i + 1], buf[i + 2]];
+  };
 
+  let bg = bgSpec;
+  if (!bg) {
+    // 四隅の多数決。割れたら左上を採用する。
+    const corners = [at(0, 0), at(width - 1, 0), at(0, height - 1), at(width - 1, height - 1)];
+    const tally = new Map();
+    for (const c of corners) {
+      const k = c.join(',');
+      tally.set(k, (tally.get(k) || 0) + 1);
+    }
+    let best = corners[0], bestN = 0;
+    for (const c of corners) {
+      const n = tally.get(c.join(','));
+      if (n > bestN) { best = c; bestN = n; }
+    }
+    bg = best;
+    debug(`背景色を推定: #${bg.map((v) => v.toString(16).padStart(2, '0')).join('')}`);
+  }
+  const [br, bgc, bb] = bg;
 
-def render_page(gs: str, pdf: Path, page_no: int, dpi: int, out_png: Path, log: Log) -> None:
-    cmd = [
-        gs, "-q", "-dNOPAUSE", "-dBATCH", "-dSAFER",
-        "-sDEVICE=png16m", f"-r{dpi}",
-        f"-dFirstPage={page_no}", f"-dLastPage={page_no}",
-        "-dUseCropBox", "-dTextAlphaBits=4", "-dGraphicsAlphaBits=4",
-        f"-sOutputFile={out_png}", str(pdf),
-    ]
-    log.debug("gs " + " ".join(cmd[1:]))
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0 or not out_png.exists():
-        die(f"ページ {page_no} のラスタ化に失敗しました。\n  {(proc.stderr or proc.stdout).strip()}")
+  const differs = (x, y) => {
+    const i = offset + (y * width + x) * 3;
+    return Math.abs(buf[i] - br) > tolerance
+        || Math.abs(buf[i + 1] - bgc) > tolerance
+        || Math.abs(buf[i + 2] - bb) > tolerance;
+  };
 
+  let minX = width, minY = -1, maxX = -1, maxY = -1;
+  for (let y = 0; y < height; y++) {
+    // 端から詰めて探し、見つかった時点で打ち切る
+    let first = -1;
+    for (let x = 0; x < width; x++) { if (differs(x, y)) { first = x; break; } }
+    if (first < 0) continue;
+    let last = first;
+    for (let x = width - 1; x > first; x--) { if (differs(x, y)) { last = x; break; } }
+    if (minY < 0) minY = y;
+    maxY = y;
+    if (first < minX) minX = first;
+    if (last > maxX) maxX = last;
+  }
+  if (maxY < 0) return { bbox: null, width, height };
+  return { bbox: { left: minX, upper: minY, right: maxX + 1, lower: maxY + 1 }, width, height };
+}
 
-def parse_bg(spec: str):
-    """--bg の値を (r,g,b) か None(=auto) に変換する。"""
-    if spec == "auto":
-        return None
-    m = re.fullmatch(r"#?([0-9a-fA-F]{6})", spec)
-    if not m:
-        die(f"--bg には auto か #RRGGBB を指定してください: {spec!r}")
-    h = m.group(1)
-    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+// ---------------------------------------------------------------- 引数
 
+function parseBg(spec) {
+  if (spec === 'auto') return null;
+  const m = /^#?([0-9a-fA-F]{6})$/.exec(spec);
+  if (!m) die(`--bg には auto か #RRGGBB を指定してください: ${JSON.stringify(spec)}`);
+  const h = m[1];
+  return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16));
+}
 
-def detect_bbox(png: Path, bg, tolerance: int, log: Log):
-    """背景色と異なる画素の bbox を (left, upper, right, lower) px で返す。無地なら None。"""
-    from PIL import Image, ImageChops
+// "1,3-5" のような指定を 1 始まりのページ番号リストにする
+function parseSlides(spec, total) {
+  if (!spec) return Array.from({ length: total }, (_, i) => i + 1);
+  const out = [];
+  for (const raw of spec.split(',')) {
+    const part = raw.trim();
+    if (!part) continue;
+    const m = /^(\d+)(?:-(\d+))?$/.exec(part);
+    if (!m) die(`--slide の書式が不正です: ${JSON.stringify(part)}（例: 1,3-5）`);
+    const a = parseInt(m[1], 10);
+    const b = m[2] ? parseInt(m[2], 10) : a;
+    if (a < 1 || b < a) die(`--slide の範囲が不正です: ${JSON.stringify(part)}`);
+    for (let n = a; n <= b; n++) out.push(n);
+  }
+  const over = out.find((n) => n > total);
+  if (over !== undefined) die(`スライド ${over} は存在しません（全 ${total} 枚）`);
+  return [...new Set(out)];
+}
 
-    img = Image.open(png).convert("RGB")
-    if bg is None:
-        w, h = img.size
-        corners = [img.getpixel(p) for p in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1))]
-        # 四隅の多数決。割れたら左上を採用する。
-        bg = max(set(corners), key=corners.count)
-        log.debug(f"背景色を推定: #{bg[0]:02x}{bg[1]:02x}{bg[2]:02x}")
-    diff = ImageChops.difference(img, Image.new("RGB", img.size, bg))
-    mask = diff.point(lambda v: 255 if v > tolerance else 0)
-    return mask.getbbox(), img.size
+const USAGE = `使い方: ${PROG} [オプション] <file.key | file.pdf>
 
+Keynote のスライドから図の部分だけを切り出した PDF を作る
 
-# ---------------------------------------------------------------- 引数
+オプション:
+  -o, --output DIR    出力先ディレクトリ（既定: 入力と同じ場所）
+      --prefix NAME   出力名の接頭辞（既定: 入力ファイル名）
+      --slide SPEC    対象スライド。例: 1,3-5（既定: 全部）
+      --margin PT     切り抜きに残す余白 pt（既定: 0）
+      --dpi N         bbox 検出のラスタ解像度（既定: 150）
+      --bg SPEC       背景色 auto|#RRGGBB|none（none で切り抜きなし）
+      --tolerance N   背景とみなす色差 0-255（既定: 8）
+      --merge         複数ページの PDF 1本にまとめて出力する
+      --force         既存ファイルを上書きする
+      --keep-uncropped  切り抜き前の PDF も残す（デバッグ用）
+  -v, --verbose       詳細を表示する
+  -q, --quiet         進捗を表示しない
+  -h, --help          この使い方を表示する
 
+例:
+  ${PROG} figures.key              → figures-01.pdf, figures-02.pdf …
+  ${PROG} --slide 3 --margin 2 figures.key
+  ${PROG} -o ~/paper/fig --prefix energy figures.key
+`;
 
-def parse_slides(spec: str, total: int):
-    """"1,3-5" のような指定を 1 始まりのページ番号リストにする。"""
-    if not spec:
-        return list(range(1, total + 1))
-    out = []
-    for part in spec.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        m = re.fullmatch(r"(\d+)(?:-(\d+))?", part)
-        if not m:
-            die(f"--slide の書式が不正です: {part!r}（例: 1,3-5）")
-        a = int(m.group(1))
-        b = int(m.group(2)) if m.group(2) else a
-        if a < 1 or b < a:
-            die(f"--slide の範囲が不正です: {part!r}")
-        out.extend(range(a, b + 1))
-    bad = [n for n in out if n > total]
-    if bad:
-        die(f"スライド {bad[0]} は存在しません（全 {total} 枚）")
-    seen, uniq = set(), []
-    for n in out:
-        if n not in seen:
-            seen.add(n)
-            uniq.append(n)
-    return uniq
+function num(value, name, { int = false, min = -Infinity, max = Infinity } = {}) {
+  const n = int ? Number.parseInt(value, 10) : Number.parseFloat(value);
+  if (!Number.isFinite(n) || (int && String(n) !== String(value).trim())) {
+    die(`${name} には数値を指定してください: ${JSON.stringify(value)}`);
+  }
+  if (n < min || n > max) die(`${name} は ${min}-${max} の範囲で指定してください`);
+  return n;
+}
 
+function parseCli(argv) {
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args: argv,
+      allowPositionals: true,
+      options: {
+        output: { type: 'string', short: 'o' },
+        prefix: { type: 'string' },
+        slide: { type: 'string', default: '' },
+        margin: { type: 'string', default: '0' },
+        dpi: { type: 'string', default: '150' },
+        bg: { type: 'string', default: 'auto' },
+        tolerance: { type: 'string', default: '8' },
+        merge: { type: 'boolean', default: false },
+        force: { type: 'boolean', default: false },
+        'keep-uncropped': { type: 'boolean', default: false },
+        verbose: { type: 'boolean', short: 'v', default: false },
+        quiet: { type: 'boolean', short: 'q', default: false },
+        help: { type: 'boolean', short: 'h', default: false },
+      },
+    });
+  } catch (e) {
+    die(`${e.message}\n\n${USAGE}`);
+  }
+  const { values: v, positionals } = parsed;
+  if (v.help) { process.stdout.write(USAGE); process.exit(0); }
+  if (positionals.length === 0) die(`変換するファイルを指定してください。\n\n${USAGE}`);
+  if (positionals.length > 1) die(`入力は1つだけ指定してください: ${positionals.join(', ')}`);
+  return {
+    input: positionals[0],
+    output: v.output,
+    prefix: v.prefix,
+    slide: v.slide,
+    margin: num(v.margin, '--margin'),
+    dpi: num(v.dpi, '--dpi', { int: true, min: 12, max: 2400 }),
+    bg: v.bg,
+    tolerance: num(v.tolerance, '--tolerance', { int: true, min: 0, max: 255 }),
+    merge: v.merge,
+    force: v.force,
+    keepUncropped: v['keep-uncropped'],
+    verbose: v.verbose,
+    quiet: v.quiet,
+  };
+}
 
-def build_parser():
-    p = argparse.ArgumentParser(
-        prog=PROG,
-        description="Keynote のスライドから図の部分だけを切り出した PDF を作る",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="例:\n"
-               "  key2pdf figures.key              → figures-01.pdf, figures-02.pdf …\n"
-               "  key2pdf --slide 3 --margin 2 figures.key\n"
-               "  key2pdf -o ~/paper/fig --prefix energy figures.key\n",
-    )
-    p.add_argument("input", help="変換する .key（または切り抜きだけ行う .pdf）")
-    p.add_argument("-o", "--output", metavar="DIR", help="出力先ディレクトリ（既定: 入力と同じ場所）")
-    p.add_argument("--prefix", metavar="NAME", help="出力名の接頭辞（既定: 入力ファイル名）")
-    p.add_argument("--slide", metavar="SPEC", default="", help="対象スライド。例: 1,3-5（既定: 全部）")
-    p.add_argument("--margin", type=float, default=0.0, metavar="PT", help="切り抜きに残す余白 pt（既定: 0）")
-    p.add_argument("--dpi", type=int, default=150, metavar="N", help="bbox 検出のラスタ解像度（既定: 150）")
-    p.add_argument("--bg", default="auto", metavar="SPEC", help="背景色 auto|#RRGGBB|none（none で切り抜きなし）")
-    p.add_argument("--tolerance", type=int, default=8, metavar="N", help="背景とみなす色差 0-255（既定: 8）")
-    p.add_argument("--merge", action="store_true", help="複数ページの PDF 1本にまとめて出力する")
-    p.add_argument("--force", action="store_true", help="既存ファイルを上書きする")
-    p.add_argument("--keep-uncropped", action="store_true", help="切り抜き前の PDF も残す（デバッグ用）")
-    p.add_argument("-v", "--verbose", action="store_true", help="詳細を表示する")
-    p.add_argument("-q", "--quiet", action="store_true", help="進捗を表示しない")
-    return p
+// ---------------------------------------------------------------- 本体
 
+function expandHome(p) {
+  return p.startsWith('~/') ? path.join(os.homedir(), p.slice(2)) : p;
+}
 
-# ---------------------------------------------------------------- 本体
+async function main() {
+  const args = parseCli(process.argv.slice(2));
+  VERBOSE = args.verbose;
+  QUIET = args.quiet;
 
+  let src = path.resolve(expandHome(args.input));
+  if (!fs.existsSync(src)) die(`入力ファイルがありません: ${src}`);
+  src = fs.realpathSync(src);
+  const suffix = path.extname(src).toLowerCase();
+  if (suffix !== '.key' && suffix !== '.pdf') {
+    die(`対応していない形式です: ${path.extname(src)}（.key か .pdf を指定してください）`);
+  }
 
-def main():
-    args = build_parser().parse_args()
-    log = Log(args.verbose, args.quiet)
+  const outDir = args.output ? path.resolve(expandHome(args.output)) : path.dirname(src);
+  fs.mkdirSync(outDir, { recursive: true });
+  const prefix = args.prefix || path.basename(src, path.extname(src));
+  const crop = args.bg !== 'none';
+  const bg = crop ? parseBg(args.bg) : null;
+  const gs = crop ? findGs() : null;
 
-    src = Path(args.input).expanduser()
-    if not src.exists():
-        die(f"入力ファイルがありません: {src}")
-    src = src.resolve()
-    suffix = src.suffix.lower()
-    if suffix not in (".key", ".pdf"):
-        die(f"対応していない形式です: {src.suffix}（.key か .pdf を指定してください）")
-    if args.tolerance < 0 or args.tolerance > 255:
-        die("--tolerance は 0-255 で指定してください")
-    if args.dpi < 12:
-        die("--dpi が小さすぎます")
+  const tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), 'key2pdf-'));
+  try {
+    let pdf = src;
+    let slideCount = null;
+    if (suffix === '.key') {
+      pdf = path.join(tmpdir, `${path.basename(src, '.key')}.pdf`);
+      info(`Keynote から書き出し中: ${path.basename(src)}`);
+      slideCount = exportKeynote(src, pdf);
+      if (args.keepUncropped) {
+        const kept = path.join(outDir, `${prefix}-uncropped.pdf`);
+        if (fs.existsSync(kept) && !args.force) {
+          die(`すでに存在します: ${kept}（上書きするなら --force）`);
+        }
+        fs.copyFileSync(pdf, kept);
+        info(`切り抜き前: ${kept}`);
+      }
+    }
 
-    out_dir = Path(args.output).expanduser() if args.output else src.parent
-    out_dir.mkdir(parents=True, exist_ok=True)
-    prefix = args.prefix or src.stem
-    crop = args.bg != "none"
-    bg = None if not crop else parse_bg(args.bg)
-    gs = find_gs() if crop else None
+    const srcDoc = await PDFDocument.load(fs.readFileSync(pdf), { updateMetadata: false });
+    const total = srcDoc.getPageCount();
+    if (slideCount !== null && slideCount !== total) {
+      // スキップ指定のスライドは書き出されないので、その分ずれることがある
+      warn(`Keynote の ${slideCount} 枚に対し書き出しは ${total} ページでした`
+         + '（スキップ設定のスライドは書き出されません）');
+    }
+    const pageNos = parseSlides(args.slide, total);
+    debug(`全 ${total} ページ中 ${pageNos.length} ページを処理`);
 
-    with tempfile.TemporaryDirectory(prefix="key2pdf-") as tmp:
-        tmpdir = Path(tmp)
-        if suffix == ".key":
-            pdf = tmpdir / (src.stem + ".pdf")
-            log.info(f"Keynote から書き出し中: {src.name}")
-            export_keynote(src, pdf, log)
-            if args.keep_uncropped:
-                kept = out_dir / f"{prefix}-uncropped.pdf"
-                if kept.exists() and not args.force:
-                    die(f"すでに存在します: {kept}（上書きするなら --force）")
-                shutil.copy2(pdf, kept)
-                log.info(f"切り抜き前: {kept}")
-        else:
-            pdf = src
+    const results = []; // { pageNo, box|null }
+    for (const pageNo of pageNos) {
+      const page = srcDoc.getPage(pageNo - 1);
+      const ref = page.getCropBox();
+      const x0 = ref.x, y0 = ref.y;
+      const x1 = ref.x + ref.width, y1 = ref.y + ref.height;
 
-        from pypdf import PdfReader, PdfWriter
-        from pypdf.generic import NameObject, RectangleObject
+      if (!crop) { results.push({ pageNo, box: null }); continue; }
 
-        reader = PdfReader(str(pdf))
-        total = len(reader.pages)
-        pages = parse_slides(args.slide, total)
-        log.debug(f"全 {total} ページ中 {len(pages)} ページを処理")
+      const rot = ((page.getRotation().angle % 360) + 360) % 360;
+      if (rot !== 0) {
+        warn(`スライド ${pageNo}: /Rotate ${rot} のページは切り抜きをスキップします`);
+        results.push({ pageNo, box: null });
+        continue;
+      }
 
-        results = []  # (page_no, page, box or None)
-        for page_no in pages:
-            page = reader.pages[page_no - 1]
-            ref = page.cropbox if page.cropbox else page.mediabox
-            x0, y0 = float(ref.left), float(ref.bottom)
-            x1, y1 = float(ref.right), float(ref.top)
-            w_pt, h_pt = x1 - x0, y1 - y0
+      let dpi = args.dpi;
+      const longestPt = Math.max(ref.width, ref.height);
+      if ((longestPt * dpi) / 72 > MAX_RASTER_PX) {
+        dpi = Math.max(12, Math.floor((MAX_RASTER_PX * 72) / longestPt));
+        warn(`スライドが大きいため検出解像度を ${dpi} dpi に下げました`);
+      }
 
-            if not crop:
-                results.append((page_no, page, None))
-                continue
+      const ppm = path.join(tmpdir, `page-${pageNo}.ppm`);
+      renderPage(gs, pdf, pageNo, dpi, ppm);
+      const { bbox, width: imgW, height: imgH } = detectBbox(ppm, bg, args.tolerance);
+      fs.rmSync(ppm, { force: true });
 
-            rot = int(page.get("/Rotate", 0) or 0) % 360
-            if rot:
-                log.warn(f"スライド {page_no}: /Rotate {rot} のページは切り抜きをスキップします")
-                results.append((page_no, page, None))
-                continue
+      if (!bbox) {
+        warn(`スライド ${pageNo}: 背景色以外の内容がありません。切り抜かずに出力します`);
+        results.push({ pageNo, box: null });
+        continue;
+      }
 
-            dpi = args.dpi
-            longest = max(w_pt, h_pt) * dpi / 72.0
-            if longest > MAX_RASTER_PX:
-                dpi = max(12, int(MAX_RASTER_PX * 72.0 / max(w_pt, h_pt)))
-                log.warn(f"スライドが大きいため検出解像度を {dpi} dpi に下げました")
+      // アンチエイリアスの端が欠けないよう 1px 外に広げる
+      const left = Math.max(0, bbox.left - 1);
+      const upper = Math.max(0, bbox.upper - 1);
+      const right = Math.min(imgW, bbox.right + 1);
+      const lower = Math.min(imgH, bbox.lower + 1);
+      if (left === 0 && upper === 0 && right === imgW && lower === imgH) {
+        warn(`スライド ${pageNo}: ページ全体が内容と判定され切り抜けませんでした。`
+           + '背景が塗り・画像・グラデーションの可能性があります'
+           + '（--bg で背景色を指定するか白無地テーマを使ってください）');
+      }
 
-            png = tmpdir / f"page-{page_no}.png"
-            render_page(gs, pdf, page_no, dpi, png, log)
-            bbox, (img_w, img_h) = detect_bbox(png, bg, args.tolerance, log)
-            png.unlink(missing_ok=True)
+      const s = 72 / dpi;
+      const m = args.margin;
+      const nx0 = Math.max(x0, x0 + left * s - m);
+      const nx1 = Math.min(x1, x0 + right * s + m);
+      // 画像は上が原点、PDF は下が原点
+      const ny1 = Math.min(y1, y1 - upper * s + m);
+      const ny0 = Math.max(y0, y1 - lower * s - m);
+      results.push({ pageNo, box: { x: nx0, y: ny0, width: nx1 - nx0, height: ny1 - ny0 } });
+      debug(`スライド ${pageNo}: ${ref.width.toFixed(1)}x${ref.height.toFixed(1)}pt → `
+          + `${(nx1 - nx0).toFixed(1)}x${(ny1 - ny0).toFixed(1)}pt`);
+    }
 
-            if bbox is None:
-                log.warn(f"スライド {page_no}: 背景色以外の内容がありません。切り抜かずに出力します")
-                results.append((page_no, page, None))
-                continue
+    // 連番を省くのは書類全体が1枚のときだけ。--slide で1枚選んだ場合は番号を残す
+    let targets;
+    if (args.merge || total === 1) {
+      targets = [{ file: path.join(outDir, `${prefix}.pdf`), items: results }];
+    } else {
+      const width = Math.max(2, String(Math.max(...results.map((r) => r.pageNo))).length);
+      targets = results.map((r) => ({
+        file: path.join(outDir, `${prefix}-${String(r.pageNo).padStart(width, '0')}.pdf`),
+        items: [r],
+      }));
+    }
 
-            # アンチエイリアスの端が欠けないよう 1px 外に広げる
-            left, upper, right, lower = bbox
-            left, upper = max(0, left - 1), max(0, upper - 1)
-            right, lower = min(img_w, right + 1), min(img_h, lower + 1)
-            if (left, upper, right, lower) == (0, 0, img_w, img_h):
-                log.warn(f"スライド {page_no}: ページ全体が内容と判定され切り抜けませんでした。"
-                         "背景が塗り・画像・グラデーションの可能性があります（--bg で背景色を指定するか白無地テーマを使ってください）")
+    // 一部だけ書いて止まらないよう、書き始める前にまとめて確認する
+    if (!args.force) {
+      const clash = targets.find((t) => fs.existsSync(t.file));
+      if (clash) die(`すでに存在します: ${clash.file}（上書きするなら --force）`);
+    }
 
-            s = 72.0 / dpi
-            m = args.margin
-            nx0 = max(x0, x0 + left * s - m)
-            nx1 = min(x1, x0 + right * s + m)
-            # 画像は上が原点、PDF は下が原点
-            ny1 = min(y1, y1 - upper * s + m)
-            ny0 = max(y0, y1 - lower * s - m)
-            results.append((page_no, page, (nx0, ny0, nx1, ny1)))
-            log.debug(f"スライド {page_no}: {w_pt:.1f}x{h_pt:.1f}pt → "
-                      f"{nx1 - nx0:.1f}x{ny1 - ny0:.1f}pt")
+    for (const { file, items } of targets) {
+      const out = await PDFDocument.create();
+      const copied = await out.copyPages(srcDoc, items.map((r) => r.pageNo - 1));
+      copied.forEach((page, i) => {
+        out.addPage(page);
+        const box = items[i].box;
+        if (!box) return;
+        page.setMediaBox(box.x, box.y, box.width, box.height);
+        page.setCropBox(box.x, box.y, box.width, box.height);
+        for (const key of ['BleedBox', 'TrimBox', 'ArtBox']) {
+          if (page.node.get(PDFName.of(key))) {
+            page[`set${key}`](box.x, box.y, box.width, box.height);
+          }
+        }
+      });
+      fs.writeFileSync(file, await out.save());
+      info(file);
+    }
+  } finally {
+    fs.rmSync(tmpdir, { recursive: true, force: true });
+  }
+}
 
-        def apply_box(page, box):
-            if box is None:
-                return page
-            page.mediabox = RectangleObject(box)
-            page.cropbox = RectangleObject(box)
-            for key in ("/BleedBox", "/TrimBox", "/ArtBox"):
-                if key in page:
-                    page[NameObject(key)] = RectangleObject(box)
-            return page
-
-        def write(path: Path, items):
-            writer = PdfWriter()
-            for page_no, page, box in items:
-                writer.add_page(apply_box(page, box))
-            with open(path, "wb") as fh:
-                writer.write(fh)
-
-        # 連番を省くのは書類全体が1枚のときだけ。--slide で1枚選んだ場合は番号を残す
-        if args.merge or total == 1:
-            targets = [(out_dir / f"{prefix}.pdf", results)]
-        else:
-            width = max(2, len(str(max(p for p, _, _ in results))))
-            targets = [(out_dir / f"{prefix}-{item[0]:0{width}d}.pdf", [item]) for item in results]
-
-        # 一部だけ書いて止まらないよう、書き始める前にまとめて確認する
-        if not args.force:
-            clash = [t for t, _ in targets if t.exists()]
-            if clash:
-                die(f"すでに存在します: {clash[0]}（上書きするなら --force）")
-
-        for target, items in targets:
-            write(target, items)
-            log.info(f"{target}")
-
-
-if __name__ == "__main__":
-    main()
+main().catch((e) => die(e && e.stack ? e.stack : String(e)));

@@ -1,0 +1,10 @@
+{
+  "name": "key2pdf",
+  "version": "1.0.0",
+  "description": "Keynote のスライドから図の部分だけを切り出した PDF を作るコマンド",
+  "bin": { "key2pdf": "./key2pdf" },
+  "scripts": { "test": "./tests/run_tests.sh" },
+  "dependencies": { "pdf-lib": "^1.17.1" },
+  "license": "MIT",
+  "private": true
+}

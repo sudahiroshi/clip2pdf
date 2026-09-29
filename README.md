@@ -20,16 +20,14 @@ $ key2pdf figures.key
 ## 必要なもの
 
 - macOS + Keynote（`.key` の書き出しに使います）
+- Node.js 18 以上（`node:util` の `parseArgs` を使います）
 - Ghostscript（`gs`）— 切り抜き範囲の検出に使います。MacTeX に同梱、または `brew install ghostscript`
-- Python 3 と `pypdf` / `pillow`
-  - [uv](https://docs.astral.sh/uv/) があれば何も入れなくて構いません。
-    スクリプト先頭の宣言から依存を自動で用意します。
-  - uv がなければ `pip3 install --user pypdf pillow` のうえ `python3 key2pdf …` で実行してください。
 
 ## 導入
 
 ```sh
 git clone <this repo> ~/tako/key2pdf
+cd ~/tako/key2pdf && npm install                      # 依存は pdf-lib だけ
 ln -s ~/tako/key2pdf/key2pdf /usr/local/bin/key2pdf   # お好みで PATH へ
 ```
 
@@ -66,7 +64,9 @@ key2pdf slides.pdf                         # 書き出し済み PDF の切り抜
 
 1. AppleScript（JXA）で Keynote に PDF を書き出させる
 2. Ghostscript で1ページずつラスタ化し、**背景色と異なる画素**の範囲を求める
-3. `pypdf` でページの `MediaBox` / `CropBox` をその範囲に付け替える
+3. [pdf-lib](https://pdf-lib.js.org/) でページの `MediaBox` / `CropBox` をその範囲に付け替える
+
+ラスタ化は Ghostscript に PPM（生の RGB）で吐かせて自前で読むので、画像ライブラリは要りません。
 
 `pdfcrop` や `gs -sDEVICE=bbox` を使わないのは、これらが「塗られたかどうか」でしか
 判定せず、Keynote が必ず描くスライド背景の白い矩形を内容とみなしてしまい、
@@ -84,13 +84,15 @@ key2pdf slides.pdf                         # 書き出し済み PDF の切り抜
   `--tolerance` を上げてください。
 - Keynote で使ったフォントはサブセットが PDF に埋め込まれます。TeX 本文のフォントには揃いません。
 - パスワード保護された `.key` は書き出せません。
+- Keynote で「スライドをスキップ」にしたスライドは書き出されません。その分だけ
+  `--slide` の番号と Keynote 上のスライド番号がずれます（枚数が食い違うと警告を出します）。
 - 切り抜きはページ矩形の付け替えなので、矩形の外の内容はファイル内に残ります
   （表示・印刷はされません）。完全に捨てたい場合は出力を `gs` で再蒸留してください。
 
 ## テスト
 
 ```sh
-./tests/run_tests.sh
+npm test          # = ./tests/run_tests.sh
 ```
 
 既知の寸法の PDF を `pdflatex` で作り、切り抜き結果の実寸・`--margin`・`--slide`・
