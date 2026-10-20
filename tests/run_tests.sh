@@ -208,6 +208,11 @@ TEX
   fi
 }
 
+# 画像として埋め込まれていないか（ベクタのままか）
+is_vector() {
+  ! grep -qa "/Subtype */Image" "$1"
+}
+
 # ページ全面を白で塗る指示が入っているか（CGPDFContext は "1 sc 0 0 W H re f" を出す）
 has_white_backing() {
   /usr/bin/ruby -e '
@@ -256,6 +261,29 @@ clip2pdf_suite() {
       size_is "クリップボードの図を切り抜いて保存できる" "$W/clip.pdf" 0 241.44 121.44 0.01
     else
       ng "クリップボード経由の変換に失敗した"
+    fi
+
+    if [ "$WITH_KEYNOTE" = 1 ]; then
+      # Keynote はクリップボードに PDF を載せないので、貼り戻してベクタ化する経路を確かめる
+      echo "[clip2pdf] Keynote からコピーして取り出す"
+      if osascript tests/make_sample_key.applescript "$W/sample.key" >/dev/null 2>&1 \
+         && osascript tests/copy_from_keynote.applescript "$W/sample.key" >/dev/null 2>&1; then
+        ok "Keynote の図をコピーできた"
+        if "$BIN" --clipboard "$W/kn-vector.pdf" --keynote 2>/dev/null; then
+          size_is "ベクタで取り出せる" "$W/kn-vector.pdf" 0 99.84 24.96 4
+          check "画像化されていない" is_vector "$W/kn-vector.pdf"
+        else
+          ng "Keynote 経由の取り出しに失敗した"
+        fi
+        if "$BIN" --clipboard "$W/kn-image.pdf" 2>/dev/null; then
+          size_is "画像としても取り出せる" "$W/kn-image.pdf" 0 99.84 24.96 4
+          fails "画像経路は画像として入る" is_vector "$W/kn-image.pdf"
+        else
+          ng "画像経路の取り出しに失敗した"
+        fi
+      else
+        ng "Keynote からのコピーに失敗した（アクセシビリティの許可を確認してください）"
+      fi
     fi
   fi
 }

@@ -8,6 +8,7 @@
 // CLI の key2pdf / pdftrim と同じ考え方・同じ結果になる。
 
 import AppKit
+import ApplicationServices
 import PDFKit
 
 // ---------------------------------------------------------------- 切り抜き
@@ -186,7 +187,8 @@ enum Clipboard {
                 return (d, "画像ファイル")
             }
         }
-        for type in [NSPasteboard.PasteboardType.tiff, NSPasteboard.PasteboardType.png] {
+        // PNG を先に見る（Keynote の TIFF は無圧縮で10MB を超えることがある）
+        for type in [NSPasteboard.PasteboardType.png, NSPasteboard.PasteboardType.tiff] {
             if let d = pb.data(forType: type), let img = NSImage(data: d),
                let pdf = pdfData(from: img) {
                 return (pdf, "画像（\(type.rawValue)）")
@@ -200,6 +202,121 @@ enum Clipboard {
         let doc = PDFDocument()
         doc.insert(page, at: 0)
         return doc.dataRepresentation()
+    }
+}
+
+
+// ---------------------------------------------------------------- Keynote 経由でベクタ化
+
+// Keynote はクリップボードに PDF を載せない（PNG/TIFF と iWork 独自形式だけ）。
+// そのため、ベクタで取り出すには一時書類に貼り戻して PDF へ書き出すしかない。
+// 貼り付けは ⌘V を送るほかなく、アクセシビリティの許可が要る。
+/// 取り出しの結果。失敗時は画面に出す理由を持つ
+enum Outcome {
+    case ok(Data)
+    case failed(String)
+}
+
+enum Keynote {
+    static let nativeType = NSPasteboard.PasteboardType("com.apple.iWork.TSPNativeData")
+
+    static func clipboardHasObjects() -> Bool {
+        NSPasteboard.general.types?.contains(nativeType) ?? false
+    }
+
+    /// 貼り付けは ⌘V を送るしかないため、アクセシビリティの許可が要る。
+    /// 未許可なら OS の案内ダイアログを出す（そこから設定を開ける）。
+    static func ensureAccessibility() -> Bool {
+        if AXIsProcessTrusted() { return true }
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
+        return AXIsProcessTrustedWithOptions(options as CFDictionary)
+    }
+
+    private static let script = """
+    on run argv
+    	set dst to item 1 of argv
+    	if application "Keynote" is not running then
+    		do shell script "open -g -a Keynote"
+    	end if
+    	-- 起動直後はイベントを受け取れないので、応答するまで待つ
+    	repeat 150 times
+    		try
+    			tell application "Keynote" to count documents
+    			exit repeat
+    		on error
+    			delay 0.2
+    		end try
+    	end repeat
+    	tell application "Keynote"
+    		activate
+    		set doc to make new document
+    		set width of doc to 2800
+    		set height of doc to 2800
+    		tell slide 1 of doc
+    			set title showing to false
+    			set body showing to false
+    		end tell
+    	end tell
+    	delay 0.8
+    	tell application "System Events" to tell process "Keynote"
+    		keystroke "v" using command down
+    	end tell
+    	set n to 0
+    	repeat 50 times
+    		delay 0.2
+    		tell application "Keynote" to set n to count of (every iWork item of slide 1 of front document)
+    		if n > 0 then exit repeat
+    	end repeat
+    	tell application "Keynote"
+    		set doc to front document
+    		if n is 0 then
+    			close doc saving no
+    			error "クリップボードの内容を Keynote に貼り付けられませんでした"
+    		end if
+    		export doc to POSIX file dst as PDF with properties {export style:IndividualSlides, all stages:false, skipped slides:false, PDF image quality:Best}
+    		close doc saving no
+    	end tell
+    	return n as string
+    end run
+    """
+
+    /// クリップボードの Keynote オブジェクトを、一時書類に貼り直して PDF として取り出す
+    static func vectorPDF() -> Outcome {
+        guard ensureAccessibility() else {
+            return .failed("アクセシビリティの許可が必要です"
+                + "（システム設定 > プライバシーとセキュリティ > アクセシビリティ で clip2pdf を許可してください）")
+        }
+        let dst = FileManager.default.temporaryDirectory
+            .appendingPathComponent("clip2pdf-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: dst) }
+
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        task.arguments = ["-", dst.path]
+        let input = Pipe(), errors = Pipe()
+        task.standardInput = input
+        task.standardError = errors
+        task.standardOutput = Pipe()
+        do { try task.run() } catch { return .failed("osascript を起動できません") }
+        input.fileHandleForWriting.write(Data(script.utf8))
+        input.fileHandleForWriting.closeFile()
+        let errData = errors.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+
+        guard task.terminationStatus == 0, let data = try? Data(contentsOf: dst), !data.isEmpty else {
+            let msg = (String(data: errData, encoding: .utf8) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if msg.contains("-1719") || msg.lowercased().contains("assistive") {
+                return .failed("アクセシビリティの許可が必要です"
+                    + "（システム設定 > プライバシーとセキュリティ > アクセシビリティ で clip2pdf を許可してください）")
+            }
+            if msg.contains("-1743") {
+                return .failed("Keynote を操作する許可が必要です"
+                    + "（システム設定 > プライバシーとセキュリティ > オートメーション）")
+            }
+            return .failed("Keynote 経由の取り出しに失敗しました: \(msg)")
+        }
+        return .ok(data)
     }
 }
 
@@ -308,6 +425,9 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let backgroundControl = NSSegmentedControl(labels: ["透明", "白"],
                                                        trackingMode: .selectOne,
                                                        target: nil, action: nil)
+    private let extractControl = NSSegmentedControl(labels: ["ベクタ（Keynote 経由）", "画像"],
+                                                    trackingMode: .selectOne,
+                                                    target: nil, action: nil)
     private let autoSaveCheck = NSButton(checkboxWithTitle: "ペーストしたら自動で保存",
                                          target: nil, action: nil)
     private let marginField = NSTextField(string: "0")
@@ -316,9 +436,11 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let dirLabel = NSTextField(labelWithString: "")
     private let statusLabel = NSTextField(labelWithString: "Keynote で図をコピーして、⌘V でペーストしてください")
     private let saveButton = NSButton(title: "保存", target: nil, action: nil)
+    private let settingsButton = NSButton(title: "設定を開く", target: nil, action: nil)
 
     private var current: Data?          // 切り抜き後（保存されるもの）
     private var original: Data?         // ペーストされたそのまま
+    private var usedKeynote = false     // Keynote 経由で取り出したか（地色が入っている）
     private var saveDir = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask)[0]
 
     private let defaults = UserDefaults.standard
@@ -332,6 +454,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         toleranceField.stringValue = defaults.string(forKey: "tolerance") ?? "8"
         trimCheck.state = (defaults.object(forKey: "trim") as? Bool ?? true) ? .on : .off
         backgroundControl.selectedSegment = defaults.integer(forKey: "background")
+        extractControl.selectedSegment = defaults.integer(forKey: "extract")
         autoSaveCheck.state = (defaults.bool(forKey: "autoSave")) ? .on : .off
 
         buildMenu()
@@ -383,13 +506,18 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         drop.onDrop = { [weak self] in self?.paste() }
         statusLabel.lineBreakMode = .byTruncatingMiddle
         statusLabel.textColor = .secondaryLabelColor
+        settingsButton.target = self
+        settingsButton.action = #selector(openAccessibilitySettings)
+        settingsButton.isHidden = true
         saveButton.target = self
         saveButton.action = #selector(saveCurrent)
         saveButton.keyEquivalent = "\r"
         saveButton.isEnabled = false
         for c in [trimCheck, autoSaveCheck] { c.target = self; c.action = #selector(optionChanged) }
-        backgroundControl.target = self
-        backgroundControl.action = #selector(optionChanged)
+        for c in [backgroundControl, extractControl] {
+            c.target = self
+            c.action = #selector(optionChanged)
+        }
         for f in [marginField, toleranceField, prefixField] { f.target = self; f.action = #selector(optionChanged) }
         let chooseButton = NSButton(title: "変更…", target: self, action: #selector(chooseDir))
         updateDirLabel()
@@ -398,10 +526,11 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
             drop,
             row([trimCheck, NSTextField(labelWithString: "余白"), marginField,
                  NSTextField(labelWithString: "pt   しきい値"), toleranceField, NSView()]),
+            row([NSTextField(labelWithString: "取り出し:"), extractControl, NSView()]),
             row([NSTextField(labelWithString: "背景:"), backgroundControl, NSView()]),
             row([NSTextField(labelWithString: "保存先:"), dirLabel, chooseButton, NSView()]),
             row([NSTextField(labelWithString: "名前:"), prefixField, autoSaveCheck, NSView(), saveButton]),
-            statusLabel,
+            row([statusLabel, settingsButton]),
         ])
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -436,10 +565,37 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func paste() {
+        // Keynote はクリップボードに PDF を載せないので、ベクタが要るときは貼り戻して書き出す
+        guard Keynote.clipboardHasObjects(), extractControl.selectedSegment == 0 else {
+            pasteFromClipboard()
+            return
+        }
+        status("Keynote 経由でベクタにしています…")
+        saveButton.isEnabled = false
+        DispatchQueue.global(qos: .userInitiated).async {
+            let outcome = Keynote.vectorPDF()
+            DispatchQueue.main.async {
+                NSApp.activate(ignoringOtherApps: true)
+                switch outcome {
+                case .ok(let data):
+                    self.usedKeynote = true
+                    self.original = data
+                    self.apply(note: "Keynote 経由・ベクタ")
+                    if self.autoSaveCheck.state == .on { self.saveCurrent() }
+                case .failed(let why):
+                    self.pasteFromClipboard()
+                    self.status("\(why)｜画像として取り込みました", warn: true)
+                }
+            }
+        }
+    }
+
+    private func pasteFromClipboard() {
         guard let (data, kind) = Clipboard.readPDF() else {
             status("クリップボードに図がありません（Keynote で図を選んで ⌘C してください）", warn: true)
             return
         }
+        usedKeynote = false
         original = data
         apply(note: kind)
         if autoSaveCheck.state == .on { saveCurrent() }
@@ -457,17 +613,20 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func apply(note: String?) {
         guard let src = original else { return }
-        let out = process(src, trim: trimCheck.state == .on, background: background, options: options)
+        // Keynote 経由の PDF はテーマの地色が入っているので、背景の指定は効かせない
+        backgroundControl.isEnabled = !usedKeynote
+        let out = process(src, trim: trimCheck.state == .on,
+                          background: usedKeynote ? .transparent : background, options: options)
         current = out
         saveButton.isEnabled = true
 
         guard let doc = PDFDocument(data: out), let page = doc.page(at: 0) else { return }
         let b = page.bounds(for: .cropBox)
         // 透明のときは市松模様を敷いて、白地でないことが見て分かるようにする
-        drop.showsCheckerboard = (background == .transparent)
+        drop.showsCheckerboard = (background == .transparent && !usedKeynote)
         drop.show(thumbnail(of: page))
         let before = PDFDocument(data: src)?.page(at: 0)?.bounds(for: .cropBox) ?? b
-        let kind = note.map { "\($0)・" } ?? ""
+        let kind = note.map { "\($0)・" } ?? (usedKeynote ? "Keynote 経由・ベクタ・" : "")
         if trimCheck.state == .on {
             status(String(format: "%@%.1f×%.1fpt → %.1f×%.1fpt（%dページ）",
                           kind, before.width, before.height, b.width, b.height, doc.pageCount))
@@ -519,12 +678,20 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         defaults.set(toleranceField.stringValue, forKey: "tolerance")
         defaults.set(trimCheck.state == .on, forKey: "trim")
         defaults.set(backgroundControl.selectedSegment, forKey: "background")
+        defaults.set(extractControl.selectedSegment, forKey: "extract")
         defaults.set(autoSaveCheck.state == .on, forKey: "autoSave")
     }
 
     private func status(_ text: String, warn: Bool = false) {
         statusLabel.stringValue = text
         statusLabel.textColor = warn ? .systemRed : .secondaryLabelColor
+        settingsButton.isHidden = !text.contains("アクセシビリティ")
+    }
+
+    @objc private func openAccessibilitySettings() {
+        let url = URL(string:
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
+        NSWorkspace.shared.open(url)
     }
 }
 
@@ -535,6 +702,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
 //   --clipboard <出力.pdf>         クリップボードの図を取り出して切り抜く
 // どちらも [--margin N] [--dpi N] [--tolerance N] [--no-trim]
 // [--background transparent|white] を受け付ける。
+//   --clipboard に --keynote を足すと、Keynote に貼り戻してベクタで取り出す。
 func runHeadless(_ args: [String]) -> Int32 {
     func err(_ msg: String) -> Int32 {
         FileHandle.standardError.write(Data((msg + "\n").utf8))
@@ -559,11 +727,21 @@ func runHeadless(_ args: [String]) -> Int32 {
         output = args[i + 2]
     } else if let i = args.firstIndex(of: "--clipboard") {
         guard args.count > i + 1 else { return err("使い方: clip2pdf --clipboard <出力.pdf>") }
-        guard let (d, kind) = Clipboard.readPDF() else {
-            return err("クリップボードに図がありません")
+        if args.contains("--keynote") {
+            switch Keynote.vectorPDF() {
+            case .ok(let d):
+                FileHandle.standardError.write(Data("クリップボード: Keynote 経由・ベクタ\n".utf8))
+                source = d
+            case .failed(let why):
+                return err(why)
+            }
+        } else {
+            guard let (d, kind) = Clipboard.readPDF() else {
+                return err("クリップボードに図がありません")
+            }
+            FileHandle.standardError.write(Data("クリップボード: \(kind)\n".utf8))
+            source = d
         }
-        FileHandle.standardError.write(Data("クリップボード: \(kind)\n".utf8))
-        source = d
         output = args[i + 1]
     } else {
         return err("使い方: clip2pdf [--trim <入力.pdf> | --clipboard] <出力.pdf>")
