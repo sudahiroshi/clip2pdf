@@ -75,8 +75,25 @@ function run(argv) {
 }
 `;
 
+// Keynote が起動していないと AppleEvent が -600 で失敗するので、先に起こして待つ
+function launchKeynote() {
+  const answers = () => spawnSync('osascript', ['-e', 'tell application "Keynote" to get version'],
+                                  { encoding: 'utf8' }).status === 0;
+  if (answers()) return;
+  debug('Keynote を起動します');
+  spawnSync('open', ['-g', '-a', 'Keynote']);
+  // 起動直後はまだイベントを受け取れない（-600）ので、応答するまで待つ
+  const until = Date.now() + 30000;
+  while (Date.now() < until) {
+    if (answers()) return;
+    spawnSync('sleep', ['0.2']);
+  }
+  die('Keynote を起動できませんでした');
+}
+
 // 書き出したスライド枚数を返す
 function exportKeynote(src, dst) {
+  launchKeynote();
   debug(`Keynote で書き出し: ${path.basename(src)}`);
   const res = spawnSync('osascript', ['-l', 'JavaScript', '-', src, dst], {
     input: JXA_EXPORT, encoding: 'utf8',

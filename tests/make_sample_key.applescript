@@ -3,6 +3,7 @@
 -- 既定テーマで2枚のスライドを作り、プレースホルダを消して図形代わりのテキストを1つずつ置く。
 on run argv
 	set outPath to item 1 of argv
+	waitForKeynote()
 	tell application "Keynote"
 		with timeout of 180 seconds
 			set doc to make new document
@@ -26,3 +27,20 @@ on run argv
 		end timeout
 	end tell
 end run
+
+-- Keynote は起動直後だとイベントを受け取れず -600 になるため、応答するまで待つ。
+-- do shell script / delay は Keynote への tell の外で呼ぶ必要がある。
+on waitForKeynote()
+	if application "Keynote" is not running then
+		do shell script "open -g -a Keynote"
+	end if
+	repeat 150 times
+		try
+			tell application "Keynote" to get version
+			return
+		on error
+			delay 0.2
+		end try
+	end repeat
+	error "Keynote を起動できませんでした"
+end waitForKeynote
