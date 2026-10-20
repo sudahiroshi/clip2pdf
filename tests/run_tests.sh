@@ -28,6 +28,7 @@ run_limited() { # run_limited <秒> <コマンド...>
   local pid=$!
   ( sleep "$secs"; kill -9 "$pid" 2>/dev/null ) >/dev/null 2>&1 &
   local watcher=$!
+  disown "$watcher" 2>/dev/null
   wait "$pid" 2>/dev/null
   local rc=$?
   kill "$watcher" 2>/dev/null
@@ -194,7 +195,7 @@ TEX
   if [ "$WITH_KEYNOTE" = 1 ]; then
     echo "[$LABEL] Keynote からの通し確認"
     local SAMPLE="$W/sample.key"
-    if osascript tests/make_sample_key.applescript "$SAMPLE" >/dev/null 2>&1 && [ -e "$SAMPLE" ]; then
+    if run_limited 120 osascript tests/make_sample_key.applescript "$SAMPLE" && [ -e "$SAMPLE" ]; then
       ok "サンプル .key を生成した"
       if "$KEY2PDF" -q -o "$W/key" "$SAMPLE"; then
         ok ".key から PDF を書き出して切り抜いた"
@@ -218,6 +219,12 @@ TEX
     else
       ng "サンプル .key を生成できなかった（Keynote の自動化許可を確認してください）"
     fi
+    # 使い終わった書類が残っていると次の操作が詰まるので閉じておく
+    osascript -e 'tell application "Keynote"
+	repeat while (count of documents) > 0
+		close document 1 saving no
+	end repeat
+end tell' >/dev/null 2>&1
   fi
 }
 
