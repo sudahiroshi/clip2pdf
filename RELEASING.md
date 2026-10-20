@@ -49,6 +49,23 @@ Apple Developer Program に加入し、「Developer ID Application」証明書�
 キーチェーンに入れてから行います。公証まで通せば、受け取った人はダウンロードして
 そのまま開けます。**署名が安定するので、アプリを更新しても許可が維持されます。**
 
+### スクリプトで行う
+
+```sh
+# 初回だけ: 公証の認証情報を保存する（App 用パスワードは appleid.apple.com で発行）
+xcrun notarytool store-credentials clip2pdf \
+  --apple-id "<Apple ID>" --team-id "<チームID>" --password "<App 用パスワード>"
+
+./app/sign.sh                  # ビルド → 署名 → 公証 → staple → 配布用 zip
+SKIP_NOTARIZE=1 ./app/sign.sh  # 署名だけ（手元で使う分にはこれで十分）
+```
+
+証明書はキーチェーンから自動で探します（`CODESIGN_IDENTITY` で明示も可）。
+公証のプロファイル名は既定で `clip2pdf`、`NOTARY_PROFILE` で変えられます。
+`app/build.sh` も `CODESIGN_IDENTITY` を渡せば Developer ID で署名します。
+
+### 中で何をしているか
+
 ```sh
 # 1. ビルド
 ./app/build.sh
@@ -102,6 +119,21 @@ security set-key-partition-list -S apple-tool:,apple: -s -k "$RANDOM_PW" build.k
 ```
 
 **証明書と鍵はリポジトリに置かないでください。** 必ず Secrets 経由で渡します。
+
+### 署名したか確かめる
+
+```sh
+codesign --verify --strict --verbose=2 app/build/clip2pdf.app
+codesign -d --entitlements - --xml app/build/clip2pdf.app | grep apple-events
+spctl --assess --type execute -vvv app/build/clip2pdf.app
+```
+
+`spctl` の結果は、公証前なら `rejected / source=Unnotarized Developer ID`、
+公証して staple した後なら `accepted / source=Notarized Developer ID` になります。
+
+**entitlements の確認は省かないでください。** Hardened Runtime を有効にすると
+AppleEvent の送信が既定で塞がれるため、`com.apple.security.automation.apple-events`
+が入っていないと、署名も公証も通るのに Keynote を操作できないアプリになります。
 
 ## 公開前の確認
 
