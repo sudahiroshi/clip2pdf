@@ -1,0 +1,137 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# tako:run: ./ruby/pdftrim --help
+#
+# pdftrim（Ruby 版）— PDF の余白を落として、内容にぴったり合ったページサイズにする。
+#
+# ページをラスタ化して「背景色と異なる画素」の範囲を求め、その範囲を pdfTeX で切り出す。
+# 元ページは Form XObject としてそのまま埋め込まれるので中身は無劣化。
+# 切り抜きの中身は lib/crop.rb にあり、Keynote を扱う key2pdf と共通。
+
+require 'fileutils'
+require 'optparse'
+require 'tmpdir'
+require_relative 'lib/crop'
+
+PROG = 'pdftrim'
+
+def parse_cli(argv)
+  opts = {
+    pages: '', split: false, uniform: false, margin: '0', dpi: '150',
+    bg: 'auto', tolerance: '8', noise: '0', force: false, verbose: false, quiet: false
+  }
+  parser = OptionParser.new do |o|
+    o.banner = "使い方: #{PROG} [オプション] <file.pdf>\n\n" \
+               "PDF の余白を落として、内容にぴったり合ったページサイズにする\n" \
+               "（Keynote の .key から図を切り出すときは key2pdf を使ってください）\n\n" \
+               "オプション:"
+    o.on('-o', '--output PATH', '出力先。--split なしはファイル、--split ありはディレクトリ') { |v| opts[:output] = v }
+    o.on('--pages SPEC', '対象ページ。例: 1,3-5（既定: 全部）') { |v| opts[:pages] = v }
+    o.on('--split', 'ページごとに別ファイルへ書き出す') { opts[:split] = true }
+    o.on('--uniform', '全ページを共通の矩形で切り抜き、ページサイズを揃える') { opts[:uniform] = true }
+    o.on('--margin PT', '切り抜きに残す余白 pt（既定: 0）') { |v| opts[:margin] = v }
+    o.on('--dpi N', '余白判定のラスタ解像度（既定: 150）') { |v| opts[:dpi] = v }
+    o.on('--bg SPEC', '背景色 auto|#RRGGBB（既定: auto = 四隅から推定）') { |v| opts[:bg] = v }
+    o.on('--tolerance N', '背景とみなす色差 0-255（既定: 8）') { |v| opts[:tolerance] = v }
+    o.on('--noise N', '差分画素が N 個以下の行・列は無視する（既定: 0）') { |v| opts[:noise] = v }
+    o.on('--force', '既存ファイルを上書きする') { opts[:force] = true }
+    o.on('-v', '--verbose', '詳細を表示する') { opts[:verbose] = true }
+    o.on('-q', '--quiet', '進捗を表示しない') { opts[:quiet] = true }
+    o.on('-h', '--help', 'この使い方を表示する') do
+      puts o
+      puts "\n例:"
+      puts "  #{PROG} paper.pdf                  → paper-crop.pdf"
+      puts "  #{PROG} --margin 5 slides.pdf      → 周囲に 5pt 残す"
+      puts "  #{PROG} --uniform scan.pdf         → 全ページ同じサイズに揃える"
+      puts "  #{PROG} --split figures.pdf        → figures-01.pdf, figures-02.pdf …"
+      exit 0
+    end
+  end
+  begin
+    rest = parser.parse(argv)
+  rescue OptionParser::ParseError => e
+    Crop.die("#{e.message}\n\n#{parser}")
+  end
+  Crop.die("余白を落とす PDF を指定してください。\n\n#{parser}") if rest.empty?
+  Crop.die("入力は1つだけ指定してください: #{rest.join(', ')}") if rest.size > 1
+
+  opts[:input] = rest.first
+  opts
+end
+
+def main
+  args = parse_cli(ARGV)
+  Crop.configure(prog: PROG, verbose: args[:verbose], quiet: args[:quiet])
+
+  margin = Crop.num(args[:margin], '--margin')
+  dpi = Crop.num(args[:dpi], '--dpi', int: true, min: 12, max: 2400)
+  tolerance = Crop.num(args[:tolerance], '--tolerance', int: true, min: 0, max: 255)
+  noise = Crop.num(args[:noise], '--noise', int: true, min: 0)
+
+  src = File.expand_path(Crop.expand_home(args[:input]))
+  Crop.die("入力ファイルがありません: #{src}") unless File.exist?(src)
+
+  src = File.realpath(src)
+  Crop.die("PDF を指定してください: #{File.basename(src)}") unless File.extname(src).downcase == '.pdf'
+
+  stem = File.basename(src, File.extname(src))
+  bg = Crop.parse_bg(args[:bg])
+  gs = Crop.find_gs
+  pdftex = Crop.find_pdftex
+
+  Dir.mktmpdir('pdftrim-') do |tmpdir|
+    total = Crop.page_count(pdftex, src)
+    page_nos = Crop.parse_page_spec(args[:pages], total, '--pages')
+    Crop.debug("全 #{total} ページ中 #{page_nos.size} ページを処理")
+
+    results = page_nos.map do |page_no|
+      { page_no: page_no,
+        box: Crop.detect_crop_box(gs: gs, pdf: src, page_no: page_no, dpi: dpi, margin: margin,
+                                  bg: bg, tolerance: tolerance, noise: noise, tmpdir: tmpdir) }
+    end
+
+    if args[:uniform]
+      box = Crop.union_boxes(results.map { |r| r[:box] })
+      if box
+        Crop.debug(format('共通の矩形: %.1fx%.1fpt', box[2] - box[0], box[3] - box[1]))
+        results.each { |r| r[:box] = box }
+      end
+    end
+
+    targets =
+      if args[:split]
+        dir = args[:output] ? File.expand_path(Crop.expand_home(args[:output])) : File.dirname(src)
+        FileUtils.mkdir_p(dir)
+        width = [2, results.map { |r| r[:page_no] }.max.to_s.size].max
+        results.map { |r| [File.join(dir, format("%s-%0#{width}d.pdf", stem, r[:page_no])), [r]] }
+      else
+        file =
+          if args[:output]
+            out = File.expand_path(Crop.expand_home(args[:output]))
+            # ディレクトリを渡されたらその中に既定名で置く
+            File.directory?(out) ? File.join(out, "#{stem}-crop.pdf") : out
+          else
+            File.join(File.dirname(src), "#{stem}-crop.pdf")
+          end
+        FileUtils.mkdir_p(File.dirname(file))
+        [[file, results]]
+      end
+
+    if targets.any? { |f, _| File.expand_path(f) == src }
+      Crop.die('入力と同じファイルには書き出せません。-o で別の名前を指定してください')
+    end
+    # 一部だけ書いて止まらないよう、書き始める前にまとめて確認する
+    unless args[:force]
+      clash = targets.map(&:first).find { |f| File.exist?(f) }
+      Crop.die("すでに存在します: #{clash}（上書きするなら --force）") if clash
+    end
+
+    targets.each do |file, items|
+      Crop.write_pdf(pdftex, src, items, file)
+      Crop.info(file)
+    end
+  end
+end
+
+main

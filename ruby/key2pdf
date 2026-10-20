@@ -1,0 +1,179 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# tako:run: ./ruby/key2pdf --help
+#
+# key2pdf（Ruby + AppleScript 版）— Keynote のスライドから図の部分だけを切り出した PDF を作る。
+#
+# Keynote の書き出しは「スライド1枚 = 1ページ」なので図の周りにスライドの余白が残る。
+# 切り抜きの中身は lib/crop.rb にあり、PDF 単体を扱う pdftrim と共通。
+
+require 'fileutils'
+require 'open3'
+require 'optparse'
+require 'tmpdir'
+require_relative 'lib/crop'
+
+PROG = 'key2pdf'
+APPLESCRIPT = File.join(__dir__, 'applescript', 'export_keynote.applescript')
+
+# ---------------------------------------------------------------- Keynote 書き出し
+
+# 書き出したスライド枚数を返す
+def export_keynote(src, dst)
+  Crop.debug("Keynote で書き出し: #{File.basename(src)}")
+  out, err, st = Open3.capture3('osascript', APPLESCRIPT, src, dst)
+  unless st.success?
+    detail = (err.to_s + out.to_s).strip
+    hint = ''
+    if detail.include?('-1743') || detail.include?('Not authorized')
+      hint = "\n  システム設定 > プライバシーとセキュリティ > オートメーション で、" \
+             'ターミナルから Keynote を操作する許可を与えてください。'
+    end
+    Crop.die("Keynote での書き出しに失敗しました。\n  #{detail}#{hint}")
+  end
+  unless File.exist?(dst)
+    Crop.die('Keynote が PDF を出力しませんでした（パスワード保護された書類かもしれません）')
+  end
+
+  Crop.debug("書き出し完了: #{dst}")
+  Integer(out.to_s.strip, exception: false)
+rescue Errno::ENOENT
+  Crop.die('osascript を実行できませんでした（macOS 以外では動きません）')
+end
+
+# ---------------------------------------------------------------- 引数
+
+def parse_cli(argv)
+  opts = {
+    slide: '', margin: '0', dpi: '150', bg: 'auto', tolerance: '8', noise: '0',
+    merge: false, force: false, keep_uncropped: false, verbose: false, quiet: false
+  }
+  parser = OptionParser.new do |o|
+    o.banner = "使い方: #{PROG} [オプション] <file.key | file.pdf>\n\n" \
+               "Keynote のスライドから図の部分だけを切り出した PDF を作る\n" \
+               "（PDF の余白だけを落としたいときは pdftrim を使ってください）\n\n" \
+               "オプション:"
+    o.on('-o', '--output DIR', '出力先ディレクトリ（既定: 入力と同じ場所）') { |v| opts[:output] = v }
+    o.on('--prefix NAME', '出力名の接頭辞（既定: 入力ファイル名）') { |v| opts[:prefix] = v }
+    o.on('--slide SPEC', '対象スライド。例: 1,3-5（既定: 全部）') { |v| opts[:slide] = v }
+    o.on('--margin PT', '切り抜きに残す余白 pt（既定: 0）') { |v| opts[:margin] = v }
+    o.on('--dpi N', 'bbox 検出のラスタ解像度（既定: 150）') { |v| opts[:dpi] = v }
+    o.on('--bg SPEC', '背景色 auto|#RRGGBB|none（none で切り抜きなし）') { |v| opts[:bg] = v }
+    o.on('--tolerance N', '背景とみなす色差 0-255（既定: 8）') { |v| opts[:tolerance] = v }
+    o.on('--noise N', '差分画素が N 個以下の行・列は無視する（既定: 0）') { |v| opts[:noise] = v }
+    o.on('--merge', '複数ページの PDF 1本にまとめて出力する') { opts[:merge] = true }
+    o.on('--force', '既存ファイルを上書きする') { opts[:force] = true }
+    o.on('--keep-uncropped', '切り抜き前の PDF も残す（デバッグ用）') { opts[:keep_uncropped] = true }
+    o.on('-v', '--verbose', '詳細を表示する') { opts[:verbose] = true }
+    o.on('-q', '--quiet', '進捗を表示しない') { opts[:quiet] = true }
+    o.on('-h', '--help', 'この使い方を表示する') do
+      puts o
+      puts "\n例:"
+      puts "  #{PROG} figures.key              → figures-01.pdf, figures-02.pdf …"
+      puts "  #{PROG} --slide 3 --margin 2 figures.key"
+      puts "  #{PROG} -o ~/paper/fig --prefix energy figures.key"
+      exit 0
+    end
+  end
+  begin
+    rest = parser.parse(argv)
+  rescue OptionParser::ParseError => e
+    Crop.die("#{e.message}\n\n#{parser}")
+  end
+  Crop.die("変換するファイルを指定してください。\n\n#{parser}") if rest.empty?
+  Crop.die("入力は1つだけ指定してください: #{rest.join(', ')}") if rest.size > 1
+
+  opts[:input] = rest.first
+  opts
+end
+
+# ---------------------------------------------------------------- 本体
+
+def main
+  args = parse_cli(ARGV)
+  Crop.configure(prog: PROG, verbose: args[:verbose], quiet: args[:quiet])
+
+  margin = Crop.num(args[:margin], '--margin')
+  dpi = Crop.num(args[:dpi], '--dpi', int: true, min: 12, max: 2400)
+  tolerance = Crop.num(args[:tolerance], '--tolerance', int: true, min: 0, max: 255)
+  noise = Crop.num(args[:noise], '--noise', int: true, min: 0)
+
+  src = File.expand_path(Crop.expand_home(args[:input]))
+  Crop.die("入力ファイルがありません: #{src}") unless File.exist?(src)
+
+  src = File.realpath(src)
+  suffix = File.extname(src).downcase
+  unless ['.key', '.pdf'].include?(suffix)
+    Crop.die("対応していない形式です: #{File.extname(src)}（.key か .pdf を指定してください）")
+  end
+
+  out_dir = args[:output] ? File.expand_path(Crop.expand_home(args[:output])) : File.dirname(src)
+  FileUtils.mkdir_p(out_dir)
+  prefix = args[:prefix] || File.basename(src, File.extname(src))
+  do_crop = args[:bg] != 'none'
+  bg = do_crop ? Crop.parse_bg(args[:bg]) : nil
+  gs = do_crop ? Crop.find_gs : nil
+  pdftex = Crop.find_pdftex
+
+  Dir.mktmpdir('key2pdf-') do |tmpdir|
+    pdf = src
+    slide_count = nil
+    if suffix == '.key'
+      pdf = File.join(tmpdir, "#{File.basename(src, '.key')}.pdf")
+      Crop.info("Keynote から書き出し中: #{File.basename(src)}")
+      slide_count = export_keynote(src, pdf)
+      if args[:keep_uncropped]
+        kept = File.join(out_dir, "#{prefix}-uncropped.pdf")
+        if File.exist?(kept) && !args[:force]
+          Crop.die("すでに存在します: #{kept}（上書きするなら --force）")
+        end
+
+        FileUtils.cp(pdf, kept)
+        Crop.info("切り抜き前: #{kept}")
+      end
+    end
+
+    total = Crop.page_count(pdftex, pdf)
+    if slide_count && slide_count != total
+      # スキップ指定のスライドは書き出されないので、その分ずれることがある
+      Crop.warning("Keynote の #{slide_count} 枚に対し書き出しは #{total} ページでした" \
+                   '（スキップ設定のスライドは書き出されません）')
+    end
+    page_nos = Crop.parse_page_spec(args[:slide], total, '--slide')
+    Crop.debug("全 #{total} ページ中 #{page_nos.size} ページを処理")
+
+    results = page_nos.map do |page_no|
+      box = if do_crop
+              Crop.detect_crop_box(gs: gs, pdf: pdf, page_no: page_no, dpi: dpi, margin: margin,
+                                   bg: bg, tolerance: tolerance, noise: noise, tmpdir: tmpdir,
+                                   label: "スライド #{page_no}")
+            end
+      { page_no: page_no, box: box }
+    end
+
+    # 連番を省くのは書類全体が1枚のときだけ。--slide で1枚選んだ場合は番号を残す
+    targets =
+      if args[:merge] || total == 1
+        [[File.join(out_dir, "#{prefix}.pdf"), results]]
+      else
+        width = [2, results.map { |r| r[:page_no] }.max.to_s.size].max
+        results.map do |r|
+          [File.join(out_dir, format("%s-%0#{width}d.pdf", prefix, r[:page_no])), [r]]
+        end
+      end
+
+    # 一部だけ書いて止まらないよう、書き始める前にまとめて確認する
+    unless args[:force]
+      clash = targets.map(&:first).find { |f| File.exist?(f) }
+      Crop.die("すでに存在します: #{clash}（上書きするなら --force）") if clash
+    end
+
+    targets.each do |file, items|
+      Crop.write_pdf(pdftex, pdf, items, file)
+      Crop.info(file)
+    end
+  end
+end
+
+main

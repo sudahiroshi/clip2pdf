@@ -8,11 +8,13 @@
 | `pdftrim` | できあいの **PDF の余白を落として**、内容にぴったりのページサイズにする |
 
 切り抜きの中身は `lib/crop.js` で共通です。
+同じものの **Ruby + AppleScript 版**が `ruby/` にあります（[ruby/README.md](ruby/README.md)）。
+使い方・出力は Node 版と同じで、gem を使いません。
 
 ## 必要なもの
 
 - macOS + Keynote（`key2pdf` が `.key` を書き出すのに使います。`pdftrim` には不要）
-- Node.js 18 以上（`node:util` の `parseArgs` を使います）
+- Node.js 18 以上（`node:util` の `parseArgs` を使います。Ruby 版なら Ruby 2.6 以上と pdfTeX）
 - Ghostscript（`gs`）— 切り抜き範囲の検出に使います。MacTeX に同梱、または `brew install ghostscript`
 
 ## 導入
@@ -143,9 +145,9 @@ pdftrim --noise 3 --tolerance 20 scan.pdf   # スキャンの地色とゴミを�
 npm test          # = ./tests/run_tests.sh
 ```
 
-既知の寸法の PDF を `pdflatex` で作り、両コマンドの切り抜き結果の実寸・`--margin`・
-`--slide` / `--pages`・`--merge` / `--split` / `--uniform`・`--noise`・エラー処理・
-`\includegraphics` の通りを検証します（Keynote は起動しません）。
+既知の寸法の PDF を `pdflatex` で作り、**Node 版と Ruby 版の両方**について
+切り抜き結果の実寸・`--margin`・`--slide` / `--pages`・`--merge` / `--split` / `--uniform`・
+`--noise`・エラー処理・`\includegraphics` の通りを検証します（Keynote は起動しません）。
 
 Keynote からの書き出しを含む通し確認も行うなら、`--with-keynote` を付けます
 （Keynote が起動し、サンプル書類を作って変換まで通します）。

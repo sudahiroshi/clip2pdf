@@ -1,6 +1,6 @@
 #!/bin/bash
 # tako:run: ./tests/run_tests.sh
-# key2pdf の切り抜き処理を検証する。
+# key2pdf / pdftrim を Node 版・Ruby 版の両方で検証する。
 # 既定では Keynote を起動しないよう、既知の寸法の PDF を pdflatex で作って入力に使う。
 # --with-keynote を付けると Keynote での書き出し（①段）を含む通し確認も行う。
 set -u
@@ -10,9 +10,8 @@ WITH_KEYNOTE=0
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 TMP="$ROOT/tests/tmp"
-KEY2PDF="$ROOT/key2pdf"
-PDFTRIM="$ROOT/pdftrim"
 PASS=0; FAIL=0
+LABEL=""
 
 ok()   { PASS=$((PASS+1)); printf '  \033[32mok\033[0m   %s\n' "$1"; }
 ng()   { FAIL=$((FAIL+1)); printf '  \033[31mNG\033[0m   %s\n' "$1"; }
@@ -25,7 +24,7 @@ fails() { # fails <説明> <コマンド...> : 失敗を期待する
   if "$@" >/dev/null 2>&1; then ng "$desc"; else ok "$desc"; fi
 }
 
-# 出力 PDF の MediaBox 実寸 "幅 高さ" を返す
+# 出力 PDF の MediaBox 実寸 "幅 高さ" を返す（検証用の物差しは Node 側に統一する）
 pagesize() {
   node -e '
 const { PDFDocument } = require("pdf-lib");
@@ -66,9 +65,11 @@ size_is() { # size_is <説明> <pdf> <ページ> <期待幅> <期待高> <許容
   fi
 }
 
+# ---------------------------------------------------------------- フィクスチャ
+
 rm -rf "$TMP"; mkdir -p "$TMP"
 
-# --- フィクスチャ生成: 720x540pt のページに既知寸法の黒矩形を1つずつ置く ---
+# 720x540pt のページに既知寸法の黒矩形を1つずつ置く
 cat > "$TMP/fixture.tex" <<'TEX'
 \documentclass{article}
 \usepackage[paperwidth=720bp,paperheight=540bp,margin=100bp]{geometry}
@@ -79,61 +80,7 @@ cat > "$TMP/fixture.tex" <<'TEX'
 \rule{100bp}{300bp}
 \end{document}
 TEX
-echo "フィクスチャを生成中..."
-(cd "$TMP" && pdflatex -interaction=batchmode fixture.tex >/dev/null 2>&1)
-if [ ! -f "$TMP/fixture.pdf" ]; then
-  echo "pdflatex でフィクスチャを作れませんでした" >&2; exit 1
-fi
-size_is "フィクスチャ自体は 720x540pt" "$TMP/fixture.pdf" 0 720 540 0.5
-
-echo "基本の切り抜き"
-"$KEY2PDF" -q -o "$TMP/out" "$TMP/fixture.pdf"
-size_is "1枚目が矩形の実寸まで縮む" "$TMP/out/fixture-01.pdf" 0 240 120 2
-size_is "2枚目が矩形の実寸まで縮む" "$TMP/out/fixture-02.pdf" 0 100 300 2
-check "ページ数は1枚ずつ" test "$(pagecount "$TMP/out/fixture-01.pdf")" = 1
-
-echo "--margin"
-"$KEY2PDF" -q -o "$TMP/m" --margin 5 "$TMP/fixture.pdf"
-size_is "余白 5pt で縦横とも 10pt 大きい" "$TMP/m/fixture-01.pdf" 0 250 130 2
-
-echo "--slide / --prefix / --merge / --bg none"
-"$KEY2PDF" -q -o "$TMP/s" --slide 2 --prefix fig "$TMP/fixture.pdf"
-size_is "--slide 2 は2枚目だけを出す" "$TMP/s/fig-02.pdf" 0 100 300 2
-check "--slide 2 で1枚目は作られない" test ! -f "$TMP/s/fig-01.pdf"
-"$KEY2PDF" -q -o "$TMP/g" --merge "$TMP/fixture.pdf"
-check "--merge は1本にまとまる" test -f "$TMP/g/fixture.pdf"
-size_is "--merge 1ページ目" "$TMP/g/fixture.pdf" 0 240 120 2
-size_is "--merge 2ページ目" "$TMP/g/fixture.pdf" 1 100 300 2
-"$KEY2PDF" -q -o "$TMP/n" --bg none "$TMP/fixture.pdf"
-size_is "--bg none は切り抜かない" "$TMP/n/fixture-01.pdf" 0 720 540 0.5
-
-echo "エラー処理"
-fails "存在しない入力は失敗する" "$KEY2PDF" -q "$TMP/nope.key"
-fails "未対応の拡張子は失敗する" "$KEY2PDF" -q "$TMP/fixture.tex"
-fails "範囲外のスライドは失敗する" "$KEY2PDF" -q -o "$TMP/e" --slide 9 "$TMP/fixture.pdf"
-fails "--slide の書式不正は失敗する" "$KEY2PDF" -q -o "$TMP/e" --slide "a-b" "$TMP/fixture.pdf"
-fails "既存ファイルは上書きしない" "$KEY2PDF" -q -o "$TMP/out" "$TMP/fixture.pdf"
-check "--force なら上書きする" "$KEY2PDF" -q --force -o "$TMP/out" "$TMP/fixture.pdf"
-
-echo "pdftrim: PDF の余白削除"
-"$PDFTRIM" -q -o "$TMP/t/paper-crop.pdf" "$TMP/fixture.pdf"
-size_is "既定は全ページを個別に切り抜いて1本にまとめる(1p)" "$TMP/t/paper-crop.pdf" 0 240 120 2
-size_is "同(2p)" "$TMP/t/paper-crop.pdf" 1 100 300 2
-check "既定の出力名は <名前>-crop.pdf" bash -c '"$0" -q "$1" && test -f "$2"' "$PDFTRIM" "$TMP/fixture.pdf" "$TMP/fixture-crop.pdf"
-"$PDFTRIM" -q --uniform -o "$TMP/t/uni.pdf" "$TMP/fixture.pdf"
-U1=$(pagesize "$TMP/t/uni.pdf" 0); U2=$(pagesize "$TMP/t/uni.pdf" 1)
-check "--uniform は全ページ同じサイズ" test "$U1" = "$U2"
-size_is "--uniform は各ページの和になる" "$TMP/t/uni.pdf" 0 240 300 2
-"$PDFTRIM" -q --split -o "$TMP/t/sp" "$TMP/fixture.pdf"
-size_is "--split は1ページ1ファイル(1枚目)" "$TMP/t/sp/fixture-01.pdf" 0 240 120 2
-size_is "--split は1ページ1ファイル(2枚目)" "$TMP/t/sp/fixture-02.pdf" 0 100 300 2
-"$PDFTRIM" -q --pages 2 -o "$TMP/t/p2.pdf" "$TMP/fixture.pdf"
-size_is "--pages 2 は2ページ目だけ" "$TMP/t/p2.pdf" 0 100 300 2
-check "--pages 2 の出力は1ページ" test "$(pagecount "$TMP/t/p2.pdf")" = 1
-"$PDFTRIM" -q --margin 5 -o "$TMP/t/m.pdf" "$TMP/fixture.pdf"
-size_is "--margin 5 で縦横とも 10pt 大きい" "$TMP/t/m.pdf" 0 250 130 2
-
-echo "pdftrim: ゴミ取り (--noise)"
+# 図から離れたところに 0.4bp の点を置いたもの（--noise の検証用）
 cat > "$TMP/speck.tex" <<'TEX'
 \documentclass{article}
 \usepackage[paperwidth=720bp,paperheight=540bp,margin=100bp]{geometry}
@@ -142,21 +89,80 @@ cat > "$TMP/speck.tex" <<'TEX'
 \rule{240bp}{120bp}\hspace{200bp}\rule{0.4bp}{0.4bp}
 \end{document}
 TEX
+echo "フィクスチャを生成中..."
+(cd "$TMP" && pdflatex -interaction=batchmode fixture.tex >/dev/null 2>&1)
 (cd "$TMP" && pdflatex -interaction=batchmode speck.tex >/dev/null 2>&1)
-"$PDFTRIM" -q -o "$TMP/t/speck-raw.pdf" "$TMP/speck.pdf"
-SP=$(pagesize "$TMP/t/speck-raw.pdf"); SPW=${SP% *}
-if near "$SPW" 240 5; then ng "ゴミが既定で無視されてしまっている（${SPW}pt）"; else ok "既定ではゴミも内容として拾う（${SPW}pt）"; fi
-"$PDFTRIM" -q --noise 3 -o "$TMP/t/speck-clean.pdf" "$TMP/speck.pdf"
-size_is "--noise 3 でゴミを無視して図の実寸になる" "$TMP/t/speck-clean.pdf" 0 240 120 3
+if [ ! -f "$TMP/fixture.pdf" ] || [ ! -f "$TMP/speck.pdf" ]; then
+  echo "pdflatex でフィクスチャを作れませんでした" >&2; exit 1
+fi
+size_is "フィクスチャ自体は 720x540pt" "$TMP/fixture.pdf" 0 720 540 0.5
 
-echo "pdftrim: エラー処理"
-fails "PDF 以外は失敗する" "$PDFTRIM" -q "$TMP/fixture.tex"
-fails "入力と同じファイルへの出力は失敗する" "$PDFTRIM" -q -o "$TMP/fixture.pdf" "$TMP/fixture.pdf"
-fails "既存ファイルは上書きしない" "$PDFTRIM" -q -o "$TMP/t/m.pdf" "$TMP/fixture.pdf"
-check "--force なら上書きする" "$PDFTRIM" -q --force -o "$TMP/t/m.pdf" "$TMP/fixture.pdf"
+# ---------------------------------------------------------------- 本体
 
-echo "TeX に貼れるか"
-cat > "$TMP/use.tex" <<'TEX'
+# suite <ラベル> <key2pdf のパス> <pdftrim のパス> <作業ディレクトリ>
+suite() {
+  LABEL=$1; local KEY2PDF=$2 PDFTRIM=$3 W=$4
+  rm -rf "$W"; mkdir -p "$W"
+  cp "$TMP/fixture.pdf" "$TMP/speck.pdf" "$W/"
+
+  echo "[$LABEL] key2pdf: 基本の切り抜き"
+  "$KEY2PDF" -q -o "$W/out" "$W/fixture.pdf"
+  size_is "1枚目が矩形の実寸まで縮む" "$W/out/fixture-01.pdf" 0 240 120 2
+  size_is "2枚目が矩形の実寸まで縮む" "$W/out/fixture-02.pdf" 0 100 300 2
+  check "ページ数は1枚ずつ" test "$(pagecount "$W/out/fixture-01.pdf")" = 1
+  "$KEY2PDF" -q -o "$W/m" --margin 5 "$W/fixture.pdf"
+  size_is "余白 5pt で縦横とも 10pt 大きい" "$W/m/fixture-01.pdf" 0 250 130 2
+  "$KEY2PDF" -q -o "$W/s" --slide 2 --prefix fig "$W/fixture.pdf"
+  size_is "--slide 2 は2枚目だけを出す" "$W/s/fig-02.pdf" 0 100 300 2
+  check "--slide 2 で1枚目は作られない" test ! -f "$W/s/fig-01.pdf"
+  "$KEY2PDF" -q -o "$W/g" --merge "$W/fixture.pdf"
+  size_is "--merge 1ページ目" "$W/g/fixture.pdf" 0 240 120 2
+  size_is "--merge 2ページ目" "$W/g/fixture.pdf" 1 100 300 2
+  "$KEY2PDF" -q -o "$W/n" --bg none "$W/fixture.pdf"
+  size_is "--bg none は切り抜かない" "$W/n/fixture-01.pdf" 0 720 540 0.5
+
+  echo "[$LABEL] key2pdf: エラー処理"
+  fails "存在しない入力は失敗する" "$KEY2PDF" -q "$W/nope.key"
+  fails "未対応の拡張子は失敗する" "$KEY2PDF" -q "$TMP/fixture.tex"
+  fails "範囲外のスライドは失敗する" "$KEY2PDF" -q -o "$W/e" --slide 9 "$W/fixture.pdf"
+  fails "--slide の書式不正は失敗する" "$KEY2PDF" -q -o "$W/e" --slide "a-b" "$W/fixture.pdf"
+  fails "既存ファイルは上書きしない" "$KEY2PDF" -q -o "$W/out" "$W/fixture.pdf"
+  check "--force なら上書きする" "$KEY2PDF" -q --force -o "$W/out" "$W/fixture.pdf"
+
+  echo "[$LABEL] pdftrim: PDF の余白削除"
+  "$PDFTRIM" -q -o "$W/t/paper-crop.pdf" "$W/fixture.pdf"
+  size_is "既定は全ページを個別に切り抜いて1本にまとめる(1p)" "$W/t/paper-crop.pdf" 0 240 120 2
+  size_is "同(2p)" "$W/t/paper-crop.pdf" 1 100 300 2
+  check "既定の出力名は <名前>-crop.pdf" bash -c '"$0" -q "$1" && test -f "$2"' "$PDFTRIM" "$W/fixture.pdf" "$W/fixture-crop.pdf"
+  "$PDFTRIM" -q --uniform -o "$W/t/uni.pdf" "$W/fixture.pdf"
+  U1=$(pagesize "$W/t/uni.pdf" 0); U2=$(pagesize "$W/t/uni.pdf" 1)
+  check "--uniform は全ページ同じサイズ" test "$U1" = "$U2"
+  size_is "--uniform は各ページの和になる" "$W/t/uni.pdf" 0 240 300 2
+  "$PDFTRIM" -q --split -o "$W/t/sp" "$W/fixture.pdf"
+  size_is "--split は1ページ1ファイル(1枚目)" "$W/t/sp/fixture-01.pdf" 0 240 120 2
+  size_is "--split は1ページ1ファイル(2枚目)" "$W/t/sp/fixture-02.pdf" 0 100 300 2
+  "$PDFTRIM" -q --pages 2 -o "$W/t/p2.pdf" "$W/fixture.pdf"
+  size_is "--pages 2 は2ページ目だけ" "$W/t/p2.pdf" 0 100 300 2
+  check "--pages 2 の出力は1ページ" test "$(pagecount "$W/t/p2.pdf")" = 1
+  "$PDFTRIM" -q --margin 5 -o "$W/t/m.pdf" "$W/fixture.pdf"
+  size_is "--margin 5 で縦横とも 10pt 大きい" "$W/t/m.pdf" 0 250 130 2
+
+  echo "[$LABEL] pdftrim: ゴミ取り (--noise)"
+  "$PDFTRIM" -q -o "$W/t/speck-raw.pdf" "$W/speck.pdf"
+  local SP SPW; SP=$(pagesize "$W/t/speck-raw.pdf"); SPW=${SP% *}
+  if near "$SPW" 240 5; then ng "ゴミが既定で無視されてしまっている（${SPW}pt）"
+  else ok "既定ではゴミも内容として拾う（${SPW}pt）"; fi
+  "$PDFTRIM" -q --noise 3 -o "$W/t/speck-clean.pdf" "$W/speck.pdf"
+  size_is "--noise 3 でゴミを無視して図の実寸になる" "$W/t/speck-clean.pdf" 0 240 120 3
+
+  echo "[$LABEL] pdftrim: エラー処理"
+  fails "PDF 以外は失敗する" "$PDFTRIM" -q "$TMP/fixture.tex"
+  fails "入力と同じファイルへの出力は失敗する" "$PDFTRIM" -q -o "$W/fixture.pdf" "$W/fixture.pdf"
+  fails "既存ファイルは上書きしない" "$PDFTRIM" -q -o "$W/t/m.pdf" "$W/fixture.pdf"
+  check "--force なら上書きする" "$PDFTRIM" -q --force -o "$W/t/m.pdf" "$W/fixture.pdf"
+
+  echo "[$LABEL] TeX に貼れるか"
+  cat > "$W/use.tex" <<'TEX'
 \documentclass{article}
 \usepackage{graphicx}
 \begin{document}
@@ -164,36 +170,40 @@ cat > "$TMP/use.tex" <<'TEX'
 \includegraphics[width=3cm]{out/fixture-02.pdf}
 \end{document}
 TEX
-check "pdflatex で \\includegraphics が通る" bash -c "cd '$TMP' && pdflatex -interaction=batchmode use.tex"
+  check "pdflatex で \\includegraphics が通る" bash -c "cd '$W' && pdflatex -interaction=batchmode use.tex"
 
-if [ "$WITH_KEYNOTE" = 1 ]; then
-  echo "Keynote からの通し確認"
-  SAMPLE="$TMP/sample.key"
-  if osascript tests/make_sample_key.applescript "$SAMPLE" >/dev/null 2>&1 && [ -e "$SAMPLE" ]; then
-    ok "サンプル .key を生成した"
-    if "$KEY2PDF" -q -o "$TMP/key" "$SAMPLE"; then
-      ok ".key から PDF を書き出して切り抜いた"
-      for n in 01 02; do
-        f="$TMP/key/sample-$n.pdf"
-        if [ -f "$f" ]; then
-          s=$(pagesize "$f"); w=${s% *}; h=${s#* }
-          # 1920x1080pt のスライドから、置いたテキストの大きさまで縮んでいるか
-          if near "$w" 0 400 && near "$h" 0 200 && ! near "$w" 0 1; then
-            ok "スライド $n が内容の実寸まで縮んだ（${w}x${h}pt）"
+  if [ "$WITH_KEYNOTE" = 1 ]; then
+    echo "[$LABEL] Keynote からの通し確認"
+    local SAMPLE="$W/sample.key"
+    if osascript tests/make_sample_key.applescript "$SAMPLE" >/dev/null 2>&1 && [ -e "$SAMPLE" ]; then
+      ok "サンプル .key を生成した"
+      if "$KEY2PDF" -q -o "$W/key" "$SAMPLE"; then
+        ok ".key から PDF を書き出して切り抜いた"
+        for n in 01 02; do
+          local f="$W/key/sample-$n.pdf"
+          if [ -f "$f" ]; then
+            local s w h; s=$(pagesize "$f"); w=${s% *}; h=${s#* }
+            # 1920x1080pt のスライドから、置いたテキストの大きさまで縮んでいるか
+            if near "$w" 0 400 && near "$h" 0 200 && ! near "$w" 0 1; then
+              ok "スライド $n が内容の実寸まで縮んだ（${w}x${h}pt）"
+            else
+              ng "スライド $n の切り抜きが怪しい: ${w}x${h}pt（元は 1920x1080pt）"
+            fi
           else
-            ng "スライド $n の切り抜きが怪しい: ${w}x${h}pt（元は 1920x1080pt）"
+            ng "スライド $n の出力がない"
           fi
-        else
-          ng "スライド $n の出力がない"
-        fi
-      done
+        done
+      else
+        ng ".key の変換に失敗した"
+      fi
     else
-      ng ".key の変換に失敗した"
+      ng "サンプル .key を生成できなかった（Keynote の自動化許可を確認してください）"
     fi
-  else
-    ng "サンプル .key を生成できなかった（Keynote の自動化許可を確認してください）"
   fi
-fi
+}
+
+suite "Node" "$ROOT/key2pdf" "$ROOT/pdftrim" "$TMP/node"
+suite "Ruby" "$ROOT/ruby/key2pdf" "$ROOT/ruby/pdftrim" "$TMP/ruby"
 
 echo
 printf '成功 %d / 失敗 %d\n' "$PASS" "$FAIL"
