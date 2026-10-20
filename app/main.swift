@@ -160,6 +160,22 @@ enum Backing {
     }
 }
 
+/// ファイルを PDF データとして読む（.key は Keynote に書き出させる）
+func readSource(_ url: URL) -> Outcome {
+    switch url.pathExtension.lowercased() {
+    case "key":
+        return KeynoteFile.pdf(from: url)
+    case "pdf":
+        guard let d = try? Data(contentsOf: url) else { return .failed("読めません") }
+        return .ok(d)
+    default:
+        guard let img = NSImage(contentsOf: url), let d = Clipboard.pdfData(from: img) else {
+            return .failed("対応していない形式です")
+        }
+        return .ok(d)
+    }
+}
+
 /// ペーストされた PDF に、トリミングと背景の設定を適用する
 func process(_ source: Data, trim: Bool, background: Background, options: TrimOptions) -> Data {
     var out = source
@@ -328,7 +344,92 @@ enum Keynote {
     }
 }
 
+
+// ---------------------------------------------------------------- Keynote ファイルの書き出し
+
+// .key を Keynote に PDF として書き出させる（CLI の key2pdf と同じ経路）。
+// クリップボード経由と違いキー操作は不要で、オートメーションの許可だけで動く。
+enum KeynoteFile {
+    private static let script = """
+    on run argv
+    \tset srcPath to item 1 of argv
+    \tset dstPath to item 2 of argv
+    \tif application "Keynote" is not running then
+    \t\tdo shell script "open -g -a Keynote"
+    \tend if
+    \trepeat 150 times
+    \t\ttry
+    \t\t\ttell application "Keynote" to count documents
+    \t\t\texit repeat
+    \t\ton error
+    \t\t\tdelay 0.2
+    \t\tend try
+    \tend repeat
+    \ttell application "Keynote"
+    \t\tset theDoc to missing value
+    \t\tset wasOpen to false
+    \t\trepeat with d in documents
+    \t\t\ttry
+    \t\t\t\tif (POSIX path of (file of d)) is srcPath then
+    \t\t\t\t\tset theDoc to d
+    \t\t\t\t\tset wasOpen to true
+    \t\t\t\t\texit repeat
+    \t\t\t\tend if
+    \t\t\tend try
+    \t\tend repeat
+    \t\tif theDoc is missing value then
+    \t\t\tset theDoc to open (POSIX file srcPath as alias)
+    \t\tend if
+    \t\texport theDoc to POSIX file dstPath as PDF with properties {export style:IndividualSlides, all stages:false, skipped slides:false, PDF image quality:Best}
+    \t\t-- 開いていた書類は閉じない（作業中かもしれないため）
+    \t\tif not wasOpen then close theDoc saving no
+    \tend tell
+    \treturn "ok"
+    end run
+    """
+
+    static func pdf(from url: URL) -> Outcome {
+        let dst = FileManager.default.temporaryDirectory
+            .appendingPathComponent("clip2pdf-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: dst) }
+
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        task.arguments = ["-", url.path, dst.path]
+        let input = Pipe(), errors = Pipe()
+        task.standardInput = input
+        task.standardError = errors
+        task.standardOutput = Pipe()
+        do { try task.run() } catch { return .failed("osascript を起動できません") }
+        input.fileHandleForWriting.write(Data(script.utf8))
+        input.fileHandleForWriting.closeFile()
+        let errData = errors.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+
+        guard task.terminationStatus == 0, let data = try? Data(contentsOf: dst), !data.isEmpty else {
+            let msg = (String(data: errData, encoding: .utf8) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if msg.contains("-1743") {
+                return .failed("Keynote を操作する許可が必要です"
+                    + "（システム設定 > プライバシーとセキュリティ > オートメーション）")
+            }
+            return .failed("Keynote での書き出しに失敗しました: \(msg)")
+        }
+        return .ok(data)
+    }
+}
+
 // ---------------------------------------------------------------- 保存
+
+enum Pages {
+    /// 1ページだけ取り出した PDF データを作る
+    static func single(_ doc: PDFDocument, at index: Int) -> Data? {
+        guard let page = doc.page(at: index)?.copy() as? PDFPage else { return nil }
+        let out = PDFDocument()
+        out.insert(page, at: 0)
+        return out.dataRepresentation()
+    }
+}
 
 enum Saver {
     /// <接頭辞>-01.pdf のように空いている連番を探して保存し、保存先を返す
@@ -351,9 +452,11 @@ enum Saver {
 
 final class DropView: NSView {
     var onDrop: (() -> Void)?
+    var onFiles: (([URL]) -> Void)?
     var showsCheckerboard = false { didSet { needsDisplay = true } }
     let imageView = NSImageView()
-    let placeholder = NSTextField(labelWithString: "ここに ⌘V でペースト\n（図をドラッグ＆ドロップしても可）")
+    let placeholder = NSTextField(labelWithString:
+        "ここに ⌘V でペースト\nKeynote ファイルや PDF をドロップしても可")
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -415,7 +518,13 @@ final class DropView: NSView {
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { .copy }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        // ドロップされた内容を一度クリップボードに移してから、ペーストと同じ経路で扱う
+        // ファイルが落ちてきたらファイルとして開く（.key / .pdf / 画像）
+        if let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self],
+                                                           options: nil) as? [URL], !urls.isEmpty {
+            onFiles?(urls)
+            return true
+        }
+        // それ以外は一度クリップボードに移してから、ペーストと同じ経路で扱う
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.writeObjects(sender.draggingPasteboard.pasteboardItems ?? [])
@@ -445,10 +554,20 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let statusLabel = NSTextField(labelWithString: "Keynote で図をコピーして、⌘V でペーストしてください")
     private let saveButton = NSButton(title: "保存", target: nil, action: nil)
     private let settingsButton = NSButton(title: "設定を開く", target: nil, action: nil)
+    private let splitCheck = NSButton(checkboxWithTitle: "ページごとに別ファイル",
+                                      target: nil, action: nil)
+    private let besideCheck = NSButton(checkboxWithTitle: "元ファイルの隣に保存",
+                                       target: nil, action: nil)
+    private let prevButton = NSButton(title: "◀", target: nil, action: nil)
+    private let nextButton = NSButton(title: "▶", target: nil, action: nil)
+    private let pageLabel = NSTextField(labelWithString: "")
 
     private var current: Data?          // 切り抜き後（保存されるもの）
     private var original: Data?         // ペーストされたそのまま
     private var usedKeynote = false     // Keynote 経由で取り出したか（地色が入っている）
+    private var sourceName: String?     // ファイル由来ならその名前（出力名に使う）
+    private var sourceDir: URL?         // ファイル由来ならその置き場所
+    private var pageIndex = 0
     private var saveDir = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask)[0]
 
     private let defaults = UserDefaults.standard
@@ -464,6 +583,8 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         backgroundControl.selectedSegment = defaults.integer(forKey: "background")
         extractControl.selectedSegment = defaults.integer(forKey: "extract")
         autoSaveCheck.state = (defaults.bool(forKey: "autoSave")) ? .on : .off
+        splitCheck.state = (defaults.object(forKey: "split") as? Bool ?? true) ? .on : .off
+        besideCheck.state = (defaults.object(forKey: "beside") as? Bool ?? true) ? .on : .off
 
         buildMenu()
         buildWindow()
@@ -471,6 +592,17 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
+
+    // Dock アイコンへのドロップや「このアプリケーションで開く」、open コマンドから。
+    // 新旧どちらの入口も受ける（環境によって呼ばれるものが違う）
+    func application(_ application: NSApplication, open urls: [URL]) {
+        openFiles(urls)
+    }
+
+    func application(_ sender: NSApplication, openFiles filenames: [String]) {
+        openFiles(filenames.map { URL(fileURLWithPath: $0) })
+        sender.reply(toOpenOrPrint: .success)
+    }
 
     // MARK: 組み立て
 
@@ -488,6 +620,8 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let editItem = NSMenuItem()
         main.addItem(editItem)
         let editMenu = NSMenu(title: "編集")
+        editMenu.addItem(withTitle: "開く…", action: #selector(openPanel), keyEquivalent: "o")
+            .target = self
         editMenu.addItem(withTitle: "ペースト", action: #selector(paste), keyEquivalent: "v")
             .target = self
         editMenu.addItem(withTitle: "保存", action: #selector(saveCurrent), keyEquivalent: "s")
@@ -512,6 +646,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         drop.translatesAutoresizingMaskIntoConstraints = false
         drop.heightAnchor.constraint(equalToConstant: 260).isActive = true
         drop.onDrop = { [weak self] in self?.paste() }
+        drop.onFiles = { [weak self] urls in self?.openFiles(urls) }
         statusLabel.lineBreakMode = .byTruncatingMiddle
         statusLabel.textColor = .secondaryLabelColor
         settingsButton.target = self
@@ -521,7 +656,12 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         saveButton.action = #selector(saveCurrent)
         saveButton.keyEquivalent = "\r"
         saveButton.isEnabled = false
-        for c in [trimCheck, autoSaveCheck] { c.target = self; c.action = #selector(optionChanged) }
+        for c in [trimCheck, autoSaveCheck, splitCheck, besideCheck] {
+            c.target = self
+            c.action = #selector(optionChanged)
+        }
+        prevButton.target = self; prevButton.action = #selector(showPrevPage)
+        nextButton.target = self; nextButton.action = #selector(showNextPage)
         for c in [backgroundControl, extractControl] {
             c.target = self
             c.action = #selector(optionChanged)
@@ -536,7 +676,8 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
                  NSTextField(labelWithString: "pt   しきい値"), toleranceField, NSView()]),
             row([NSTextField(labelWithString: "取り出し:"), extractControl, NSView()]),
             row([NSTextField(labelWithString: "背景:"), backgroundControl, NSView()]),
-            row([NSTextField(labelWithString: "保存先:"), dirLabel, chooseButton, NSView()]),
+            row([prevButton, pageLabel, nextButton, NSView(), splitCheck]),
+            row([NSTextField(labelWithString: "保存先:"), dirLabel, chooseButton, besideCheck, NSView()]),
             row([NSTextField(labelWithString: "名前:"), prefixField, autoSaveCheck, NSView(), saveButton]),
             row([statusLabel, settingsButton]),
         ])
@@ -564,6 +705,102 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.makeKeyAndOrderFront(nil)
     }
 
+
+    // MARK: ファイルを開く
+
+    @objc private func openPanel() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.allowedFileTypes = ["key", "pdf", "png", "jpg", "jpeg", "tiff", "heic"]
+        if panel.runModal() == .OK { openFiles(panel.urls) }
+    }
+
+    /// ドロップされた（または開かれた）ファイルを順に変換して保存する。
+    /// ファイルを渡す操作は「変換してほしい」という意味なので、確認を待たずに保存する。
+    func openFiles(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        status(urls.count == 1 ? "\(urls[0].lastPathComponent) を処理しています…"
+                               : "\(urls.count) 件を処理しています…")
+        saveButton.isEnabled = false
+        DispatchQueue.global(qos: .userInitiated).async {
+            var saved: [URL] = []
+            var failures: [String] = []
+            for url in urls {
+                let outcome = readSource(url)
+                let isKey = url.pathExtension.lowercased() == "key"
+                // 画面の状態を触るので、1件ずつメインスレッドで処理する
+                DispatchQueue.main.sync {
+                    switch outcome {
+                    case .ok(let data):
+                        self.load(data, name: url.deletingPathExtension().lastPathComponent,
+                                  dir: url.deletingLastPathComponent(),
+                                  note: isKey ? "Keynote から書き出し" : nil, keynote: isKey)
+                        saved.append(contentsOf: self.saveAll(quiet: true, returning: true))
+                    case .failed(let why):
+                        failures.append("\(url.lastPathComponent): \(why)")
+                    }
+                }
+            }
+            DispatchQueue.main.async {
+                NSApp.activate(ignoringOtherApps: true)
+                if !failures.isEmpty {
+                    self.status(failures.joined(separator: " / "), warn: true)
+                } else if saved.count == 1 {
+                    self.status("保存しました: \(saved[0].path)")
+                } else {
+                    self.status("\(saved.count) 個の PDF を保存しました"
+                                + "（\(saved.first?.deletingLastPathComponent().path ?? "")）")
+                }
+            }
+        }
+    }
+
+    /// 取り込んだ PDF を保持して、設定を適用した結果を画面に出す
+    private func load(_ data: Data, name: String?, dir: URL?, note: String?, keynote: Bool) {
+        original = data
+        sourceName = name
+        sourceDir = dir
+        usedKeynote = keynote
+        pageIndex = 0
+        apply(note: note)
+    }
+
+    // MARK: ページ送り
+
+    @objc private func showPrevPage() { pageIndex -= 1; refreshPreview() }
+    @objc private func showNextPage() { pageIndex += 1; refreshPreview() }
+
+    private func refreshPreview() {
+        guard let data = current, let doc = PDFDocument(data: data) else { return }
+        pageIndex = max(0, min(pageIndex, doc.pageCount - 1))
+        if let page = doc.page(at: pageIndex) { drop.show(thumbnail(of: page)) }
+        updatePageControls(doc.pageCount)
+    }
+
+    private func updatePageControls(_ count: Int) {
+        let many = count > 1
+        prevButton.isHidden = !many
+        nextButton.isHidden = !many
+        pageLabel.isHidden = !many
+        splitCheck.isHidden = !many
+        pageLabel.stringValue = many ? "\(pageIndex + 1) / \(count) ページ" : ""
+        prevButton.isEnabled = pageIndex > 0
+        nextButton.isEnabled = pageIndex < count - 1
+    }
+
+    // MARK: 保存先と名前
+
+    private func destinationDir() -> URL {
+        if besideCheck.state == .on, let dir = sourceDir { return dir }
+        return saveDir
+    }
+
+    private func effectivePrefix() -> String {
+        if let n = sourceName, !n.isEmpty { return n }
+        return prefixField.stringValue
+    }
+
     // MARK: 操作
 
     private var options: TrimOptions {
@@ -586,9 +823,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 NSApp.activate(ignoringOtherApps: true)
                 switch outcome {
                 case .ok(let data):
-                    self.usedKeynote = true
-                    self.original = data
-                    self.apply(note: "Keynote 経由・ベクタ")
+                    self.load(data, name: nil, dir: nil, note: "Keynote 経由・ベクタ", keynote: true)
                     if self.autoSaveCheck.state == .on { self.saveCurrent() }
                 case .failed(let why):
                     self.pasteFromClipboard()
@@ -603,9 +838,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
             status("クリップボードに図がありません（Keynote で図を選んで ⌘C してください）", warn: true)
             return
         }
-        usedKeynote = false
-        original = data
-        apply(note: kind)
+        load(data, name: nil, dir: nil, note: kind, keynote: false)
         if autoSaveCheck.state == .on { saveCurrent() }
     }
 
@@ -628,12 +861,15 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         current = out
         saveButton.isEnabled = true
 
-        guard let doc = PDFDocument(data: out), let page = doc.page(at: 0) else { return }
+        guard let doc = PDFDocument(data: out), doc.pageCount > 0 else { return }
+        pageIndex = max(0, min(pageIndex, doc.pageCount - 1))
+        guard let page = doc.page(at: pageIndex) else { return }
+        updatePageControls(doc.pageCount)
         let b = page.bounds(for: .cropBox)
         // 透明のときは市松模様を敷いて、白地でないことが見て分かるようにする
         drop.showsCheckerboard = (background == .transparent && !usedKeynote)
         drop.show(thumbnail(of: page))
-        let before = PDFDocument(data: src)?.page(at: 0)?.bounds(for: .cropBox) ?? b
+        let before = PDFDocument(data: src)?.page(at: pageIndex)?.bounds(for: .cropBox) ?? b
         let kind = note.map { "\($0)・" } ?? (usedKeynote ? "Keynote 経由・ベクタ・" : "")
         if trimCheck.state == .on {
             status(String(format: "%@%.1f×%.1fpt → %.1f×%.1fpt（%dページ）",
@@ -651,14 +887,34 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return page.thumbnail(of: size, for: .cropBox)
     }
 
-    @objc private func saveCurrent() {
-        guard let data = current else { return }
+    @objc private func saveCurrent() { _ = saveAll(quiet: false) }
+
+    /// 保存して、書き出したファイルを返す。複数ページは設定に応じて1枚ずつに分ける。
+    @discardableResult
+    private func saveAll(quiet: Bool, returning: Bool = false) -> [URL] {
+        guard let data = current, let doc = PDFDocument(data: data), doc.pageCount > 0 else { return [] }
+        let dir = destinationDir()
+        let prefix = effectivePrefix()
+        var saved: [URL] = []
         do {
-            let url = try Saver.save(data, to: saveDir, prefix: prefixField.stringValue)
-            status("保存しました: \(url.path)")
+            if splitCheck.state == .on && doc.pageCount > 1 {
+                for i in 0..<doc.pageCount {
+                    guard let one = Pages.single(doc, at: i) else { continue }
+                    saved.append(try Saver.save(one, to: dir, prefix: prefix))
+                }
+            } else {
+                saved.append(try Saver.save(data, to: dir, prefix: prefix))
+            }
         } catch {
-            status("保存に失敗しました: \(error.localizedDescription)", warn: true)
+            if !quiet { status("保存に失敗しました: \(error.localizedDescription)", warn: true) }
+            return saved
         }
+        if !quiet {
+            status(saved.count == 1
+                   ? "保存しました: \(saved[0].path)"
+                   : "\(saved.count) 個の PDF を保存しました（\(dir.path)）")
+        }
+        return saved
     }
 
     @objc private func chooseDir() {
@@ -687,6 +943,8 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         defaults.set(trimCheck.state == .on, forKey: "trim")
         defaults.set(backgroundControl.selectedSegment, forKey: "background")
         defaults.set(extractControl.selectedSegment, forKey: "extract")
+        defaults.set(splitCheck.state == .on, forKey: "split")
+        defaults.set(besideCheck.state == .on, forKey: "beside")
         defaults.set(autoSaveCheck.state == .on, forKey: "autoSave")
     }
 
@@ -707,6 +965,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
 // GUI を出さずに動かすモード。CLI 版と結果を突き合わせるテストに使う。
 //   --trim <入力.pdf> <出力.pdf>   ファイルを切り抜く
+//   --convert <入力> <出力ディレクトリ>  .key / PDF / 画像をページごとに書き出す
 //   --clipboard <出力.pdf>         クリップボードの図を取り出して切り抜く
 // どちらも [--margin N] [--dpi N] [--tolerance N] [--no-trim]
 // [--background transparent|white] を受け付ける。
@@ -723,6 +982,44 @@ func runHeadless(_ args: [String]) -> Int32 {
     let opts = TrimOptions(margin: CGFloat(value("--margin", 0)),
                            dpi: CGFloat(value("--dpi", 150)),
                            tolerance: Int(value("--tolerance", 8)))
+
+    let background: Background = args.contains("--background") &&
+        args[(args.firstIndex(of: "--background") ?? 0) + 1] == "white" ? .white : .transparent
+    let trim = !args.contains("--no-trim")
+
+    // --convert: .key / PDF / 画像を読んで、ページごとに出力ディレクトリへ保存する
+    if let i = args.firstIndex(of: "--convert") {
+        guard args.count > i + 2 else {
+            return err("使い方: clip2pdf --convert <入力.key|入力.pdf> <出力ディレクトリ>")
+        }
+        let src = URL(fileURLWithPath: args[i + 1])
+        let outDir = URL(fileURLWithPath: args[i + 2])
+        var data: Data
+        switch readSource(src) {
+        case .ok(let d): data = d
+        case .failed(let why): return err(why)
+        }
+        data = process(data, trim: trim, background: background, options: opts)
+        guard let doc = PDFDocument(data: data), doc.pageCount > 0 else { return err("PDF を読めません") }
+        let prefix = src.deletingPathExtension().lastPathComponent
+        var saved = 0
+        do {
+            if args.contains("--merge") || doc.pageCount == 1 {
+                print(try Saver.save(data, to: outDir, prefix: prefix).path)
+                saved = 1
+            } else {
+                for n in 0..<doc.pageCount {
+                    guard let one = Pages.single(doc, at: n) else { continue }
+                    print(try Saver.save(one, to: outDir, prefix: prefix).path)
+                    saved += 1
+                }
+            }
+        } catch {
+            return err("保存できません: \(error.localizedDescription)")
+        }
+        FileHandle.standardError.write(Data("\(saved) 個保存しました\n".utf8))
+        return 0
+    }
 
     var source: Data
     var output: String
@@ -755,9 +1052,7 @@ func runHeadless(_ args: [String]) -> Int32 {
         return err("使い方: clip2pdf [--trim <入力.pdf> | --clipboard] <出力.pdf>")
     }
 
-    let background: Background = args.contains("--background") &&
-        args[(args.firstIndex(of: "--background") ?? 0) + 1] == "white" ? .white : .transparent
-    let result = process(source, trim: !args.contains("--no-trim"), background: background, options: opts)
+    let result = process(source, trim: trim, background: background, options: opts)
     do { try result.write(to: URL(fileURLWithPath: output)) } catch {
         return err("書き出せません: \(error.localizedDescription)")
     }
@@ -765,7 +1060,7 @@ func runHeadless(_ args: [String]) -> Int32 {
 }
 
 let args = CommandLine.arguments
-if args.contains("--trim") || args.contains("--clipboard") {
+if args.contains("--trim") || args.contains("--clipboard") || args.contains("--convert") {
     exit(runHeadless(args))
 }
 

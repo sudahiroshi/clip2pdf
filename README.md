@@ -6,14 +6,15 @@
 | --- | --- |
 | `key2pdf` | Keynote の `.key` から、スライドごとに**図の部分だけ**を切り出した PDF を作る |
 | `pdftrim` | できあいの **PDF の余白を落として**、内容にぴったりのページサイズにする |
-| `clip2pdf`（アプリ） | Keynote で図を ⌘C → アプリで **⌘V すると余白なしの PDF として保存**。ベクタ／画像、背景の透明／白を選べる（[app/README.md](app/README.md)） |
+| `clip2pdf`（アプリ） | **⌘V でペースト**、または **`.key` / PDF をウィンドウにドロップ**すると余白なしの PDF として保存。上の2つをコマンドラインなしで使える（[app/README.md](app/README.md)） |
 
 切り抜きの中身は `lib/crop.js` で共通です。
 同じものの **Ruby + AppleScript 版**が `ruby/` にあります（[ruby/README.md](ruby/README.md)）。
 使い方・出力は Node 版と同じで、gem を使いません。
 
-`.key` ファイルを経由せず、コピー＆ペーストで1枚ずつ書き出したいときは
-`clip2pdf` アプリが手軽です（Swift 製・外部依存なし）。
+コマンドラインを使わずに済ませたいときは `clip2pdf` アプリが手軽です（Swift 製・外部依存なし）。
+`.key` や PDF をウィンドウにドロップすれば `key2pdf` / `pdftrim` と同じ変換ができ、
+Keynote からコピーした図を ⌘V で貼り付けることもできます。
 
 ```sh
 ./app/build.sh && open app/build/clip2pdf.app

@@ -268,6 +268,15 @@ clip2pdf_suite() {
   size_is "--no-trim は切り抜かない" "$W/raw.pdf" 0 720 540 0.5
   fails "読めない入力は失敗する" "$BIN" --trim "$TMP/nope.pdf" "$W/x.pdf"
 
+  echo "[clip2pdf] ファイルの変換（key2pdf / pdftrim 相当）"
+  mkdir -p "$W/conv"
+  "$BIN" --convert "$TMP/fixture.pdf" "$W/conv" >/dev/null 2>&1
+  size_is "PDF をページごとに書き出す(1枚目)" "$W/conv/fixture-01.pdf" 0 241.44 121.44 0.01
+  size_is "同(2枚目)" "$W/conv/fixture-02.pdf" 0 101.28 301.44 0.01
+  "$BIN" --convert "$TMP/fixture.pdf" "$W/conv-merge" --merge >/dev/null 2>&1
+  check "--merge は1本にまとまる" test "$(pagecount "$W/conv-merge/fixture-01.pdf")" = 2
+  fails "存在しないファイルは失敗する" "$BIN" --convert "$TMP/nope.pdf" "$W/conv"
+
   echo "[clip2pdf] 背景の切り替え"
   "$BIN" --trim "$TMP/fixture.pdf" "$W/white.pdf" --background white 2>/dev/null
   size_is "白地にしても寸法は変わらない" "$W/white.pdf" 0 241.44 121.44 0.01
@@ -284,6 +293,25 @@ clip2pdf_suite() {
     fi
 
     if [ "$WITH_KEYNOTE" = 1 ]; then
+      echo "[clip2pdf] .key ファイルの変換"
+      if run_limited 120 osascript tests/make_sample_key.applescript "$W/drop.key"; then
+        mkdir -p "$W/dropout"
+        if run_limited 120 "$BIN" --convert "$W/drop.key" "$W/dropout"; then
+          size_is "スライド1が図の実寸まで縮む" "$W/dropout/drop-01.pdf" 0 99.84 24.96 4
+          size_is "スライド2が図の実寸まで縮む" "$W/dropout/drop-02.pdf" 0 97.92 24.96 4
+          check "ベクタのまま" is_vector "$W/dropout/drop-01.pdf"
+        else
+          ng ".key の変換に失敗した"
+        fi
+      else
+        skip ".key の変換用サンプルを作れませんでした"
+      fi
+      osascript -e 'tell application "Keynote"
+	repeat while (count of documents) > 0
+		close document 1 saving no
+	end repeat
+end tell' >/dev/null 2>&1
+
       # Keynote はクリップボードに PDF を載せないので、貼り戻してベクタ化する経路を確かめる
       echo "[clip2pdf] Keynote からコピーして取り出す"
       if run_limited 120 osascript tests/make_sample_key.applescript "$W/sample.key" \
