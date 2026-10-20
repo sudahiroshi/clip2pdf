@@ -129,6 +129,44 @@ enum Trim {
 
 let CGColorSpaceDeviceRGB = CGColorSpaceCreateDeviceRGB()
 
+// ---------------------------------------------------------------- 背景
+
+enum Background: Int {
+    case transparent = 0
+    case white = 1
+}
+
+enum Backing {
+    /// 各ページの下に白を敷く。元が透明な図を白地の PDF にしたいときに使う。
+    /// 逆（白く塗られた図を透明にする）はできない。塗りを消すことになるため。
+    static func fillWhite(data: Data) -> Data? {
+        guard let doc = PDFDocument(data: data), doc.pageCount > 0 else { return nil }
+        let out = NSMutableData()
+        guard let consumer = CGDataConsumer(data: out) else { return nil }
+        var initial = CGRect(x: 0, y: 0, width: 612, height: 792)
+        guard let ctx = CGContext(consumer: consumer, mediaBox: &initial, nil) else { return nil }
+        for i in 0..<doc.pageCount {
+            guard let page = doc.page(at: i) else { continue }
+            var box = CGRect(origin: .zero, size: page.bounds(for: .cropBox).size)
+            ctx.beginPage(mediaBox: &box)
+            ctx.setFillColor(gray: 1, alpha: 1)
+            ctx.fill(box)
+            page.draw(with: .cropBox, to: ctx)
+            ctx.endPage()
+        }
+        ctx.closePDF()
+        return out as Data
+    }
+}
+
+/// ペーストされた PDF に、トリミングと背景の設定を適用する
+func process(_ source: Data, trim: Bool, background: Background, options: TrimOptions) -> Data {
+    var out = source
+    if trim, let trimmed = Trim.trim(data: out, options: options) { out = trimmed }
+    if background == .white, let filled = Backing.fillWhite(data: out) { out = filled }
+    return out
+}
+
 // ---------------------------------------------------------------- クリップボード
 
 enum Clipboard {
@@ -188,6 +226,7 @@ enum Saver {
 
 final class DropView: NSView {
     var onDrop: (() -> Void)?
+    var showsCheckerboard = false { didSet { needsDisplay = true } }
     let imageView = NSImageView()
     let placeholder = NSTextField(labelWithString: "ここに ⌘V でペースト\n（図をドラッグ＆ドロップしても可）")
 
@@ -220,6 +259,24 @@ final class DropView: NSView {
 
     override func updateLayer() { updateColors() }
 
+    override func draw(_ dirty: NSRect) {
+        super.draw(dirty)
+        guard showsCheckerboard else { return }
+        let side: CGFloat = 8
+        NSColor(white: 0.90, alpha: 1).setFill()
+        var y: CGFloat = 0, row = 0
+        while y < bounds.height {
+            var x: CGFloat = (row % 2 == 0) ? 0 : side
+            while x < bounds.width {
+                NSBezierPath(rect: NSRect(x: x, y: y, width: side, height: side)
+                    .intersection(bounds.insetBy(dx: 1, dy: 1))).fill()
+                x += side * 2
+            }
+            y += side
+            row += 1
+        }
+    }
+
     private func updateColors() {
         layer?.borderColor = NSColor.separatorColor.cgColor
         layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
@@ -248,6 +305,9 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var window: NSWindow!
     private let drop = DropView(frame: .zero)
     private let trimCheck = NSButton(checkboxWithTitle: "余白をトリミング", target: nil, action: nil)
+    private let backgroundControl = NSSegmentedControl(labels: ["透明", "白"],
+                                                       trackingMode: .selectOne,
+                                                       target: nil, action: nil)
     private let autoSaveCheck = NSButton(checkboxWithTitle: "ペーストしたら自動で保存",
                                          target: nil, action: nil)
     private let marginField = NSTextField(string: "0")
@@ -271,6 +331,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         marginField.stringValue = defaults.string(forKey: "margin") ?? "0"
         toleranceField.stringValue = defaults.string(forKey: "tolerance") ?? "8"
         trimCheck.state = (defaults.object(forKey: "trim") as? Bool ?? true) ? .on : .off
+        backgroundControl.selectedSegment = defaults.integer(forKey: "background")
         autoSaveCheck.state = (defaults.bool(forKey: "autoSave")) ? .on : .off
 
         buildMenu()
@@ -327,6 +388,8 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         saveButton.keyEquivalent = "\r"
         saveButton.isEnabled = false
         for c in [trimCheck, autoSaveCheck] { c.target = self; c.action = #selector(optionChanged) }
+        backgroundControl.target = self
+        backgroundControl.action = #selector(optionChanged)
         for f in [marginField, toleranceField, prefixField] { f.target = self; f.action = #selector(optionChanged) }
         let chooseButton = NSButton(title: "変更…", target: self, action: #selector(chooseDir))
         updateDirLabel()
@@ -335,6 +398,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
             drop,
             row([trimCheck, NSTextField(labelWithString: "余白"), marginField,
                  NSTextField(labelWithString: "pt   しきい値"), toleranceField, NSView()]),
+            row([NSTextField(labelWithString: "背景:"), backgroundControl, NSView()]),
             row([NSTextField(labelWithString: "保存先:"), dirLabel, chooseButton, NSView()]),
             row([NSTextField(labelWithString: "名前:"), prefixField, autoSaveCheck, NSView(), saveButton]),
             statusLabel,
@@ -387,17 +451,20 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     /// トリミング設定を今のデータに適用し、プレビューと状態表示を更新する
+    private var background: Background {
+        Background(rawValue: backgroundControl.selectedSegment) ?? .transparent
+    }
+
     private func apply(note: String?) {
         guard let src = original else { return }
-        var out = src
-        if trimCheck.state == .on, let trimmed = Trim.trim(data: src, options: options) {
-            out = trimmed
-        }
+        let out = process(src, trim: trimCheck.state == .on, background: background, options: options)
         current = out
         saveButton.isEnabled = true
 
         guard let doc = PDFDocument(data: out), let page = doc.page(at: 0) else { return }
         let b = page.bounds(for: .cropBox)
+        // 透明のときは市松模様を敷いて、白地でないことが見て分かるようにする
+        drop.showsCheckerboard = (background == .transparent)
         drop.show(thumbnail(of: page))
         let before = PDFDocument(data: src)?.page(at: 0)?.bounds(for: .cropBox) ?? b
         let kind = note.map { "\($0)・" } ?? ""
@@ -451,6 +518,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         defaults.set(marginField.stringValue, forKey: "margin")
         defaults.set(toleranceField.stringValue, forKey: "tolerance")
         defaults.set(trimCheck.state == .on, forKey: "trim")
+        defaults.set(backgroundControl.selectedSegment, forKey: "background")
         defaults.set(autoSaveCheck.state == .on, forKey: "autoSave")
     }
 
@@ -465,7 +533,8 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
 // GUI を出さずに動かすモード。CLI 版と結果を突き合わせるテストに使う。
 //   --trim <入力.pdf> <出力.pdf>   ファイルを切り抜く
 //   --clipboard <出力.pdf>         クリップボードの図を取り出して切り抜く
-// どちらも [--margin N] [--dpi N] [--tolerance N] [--no-trim] を受け付ける。
+// どちらも [--margin N] [--dpi N] [--tolerance N] [--no-trim]
+// [--background transparent|white] を受け付ける。
 func runHeadless(_ args: [String]) -> Int32 {
     func err(_ msg: String) -> Int32 {
         FileHandle.standardError.write(Data((msg + "\n").utf8))
@@ -500,11 +569,9 @@ func runHeadless(_ args: [String]) -> Int32 {
         return err("使い方: clip2pdf [--trim <入力.pdf> | --clipboard] <出力.pdf>")
     }
 
-    var result = source
-    if !args.contains("--no-trim") {
-        guard let out = Trim.trim(data: source, options: opts) else { return err("切り抜きに失敗しました") }
-        result = out
-    }
+    let background: Background = args.contains("--background") &&
+        args[(args.firstIndex(of: "--background") ?? 0) + 1] == "white" ? .white : .transparent
+    let result = process(source, trim: !args.contains("--no-trim"), background: background, options: opts)
     do { try result.write(to: URL(fileURLWithPath: output)) } catch {
         return err("書き出せません: \(error.localizedDescription)")
     }

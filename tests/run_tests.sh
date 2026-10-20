@@ -208,6 +208,15 @@ TEX
   fi
 }
 
+# ページ全面を白で塗る指示が入っているか（CGPDFContext は "1 sc 0 0 W H re f" を出す）
+has_white_backing() {
+  /usr/bin/ruby -e '
+require "zlib"
+body = File.binread(ARGV[0]).scan(/stream\r?\n(.*?)endstream/m).flatten
+          .map { |x| (Zlib::Inflate.inflate(x) rescue nil) }.compact.join(" ")
+exit(body =~ /(1 sc|1 1 1 rg)\s+0 0 [\d.]+ [\d.]+ re\s+f/ ? 0 : 1)' "$1"
+}
+
 # ---------------------------------------------------------------- clip2pdf（アプリ）
 
 # アプリ本体の切り抜きは CLI と同じ結果になるはず。GUI は出さずに検証する。
@@ -233,6 +242,12 @@ clip2pdf_suite() {
   "$BIN" --trim "$TMP/fixture.pdf" "$W/raw.pdf" --no-trim 2>/dev/null
   size_is "--no-trim は切り抜かない" "$W/raw.pdf" 0 720 540 0.5
   fails "読めない入力は失敗する" "$BIN" --trim "$TMP/nope.pdf" "$W/x.pdf"
+
+  echo "[clip2pdf] 背景の切り替え"
+  "$BIN" --trim "$TMP/fixture.pdf" "$W/white.pdf" --background white 2>/dev/null
+  size_is "白地にしても寸法は変わらない" "$W/white.pdf" 0 241.44 121.44 0.01
+  check "--background white はページ全面に白を敷く" has_white_backing "$W/white.pdf"
+  fails "既定（透明）は白を敷かない" has_white_backing "$W/trim.pdf"
 
   if [ "$WITH_CLIPBOARD" = 1 ]; then
     echo "[clip2pdf] クリップボード経由（クリップボードの中身を書き換えます）"
