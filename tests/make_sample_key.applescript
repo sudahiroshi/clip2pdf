@@ -34,9 +34,11 @@ on waitForKeynote()
 	if application "Keynote" is not running then
 		do shell script "open -g -a Keynote"
 	end if
+	-- version はアプリが起動していなくてもバンドルから返るので、
+	-- 実際に動いていないと答えられない documents を使って判定する
 	repeat 150 times
 		try
-			tell application "Keynote" to get version
+			tell application "Keynote" to count documents
 			return
 		on error
 			delay 0.2

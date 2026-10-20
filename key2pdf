@@ -77,7 +77,9 @@ function run(argv) {
 
 // Keynote が起動していないと AppleEvent が -600 で失敗するので、先に起こして待つ
 function launchKeynote() {
-  const answers = () => spawnSync('osascript', ['-e', 'tell application "Keynote" to get version'],
+  // version はアプリが起動していなくてもバンドルから返るので、
+  // 実際に動いていないと答えられない documents を使って判定する
+  const answers = () => spawnSync('osascript', ['-e', 'tell application "Keynote" to count documents'],
                                   { encoding: 'utf8' }).status === 0;
   if (answers()) return;
   debug('Keynote を起動します');
