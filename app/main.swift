@@ -258,8 +258,17 @@ enum Keynote {
     		end tell
     	end tell
     	delay 0.8
+    	-- キー操作（⌘V）は送信そのものが拒まれることがあるので、まずメニュー項目を押す
     	tell application "System Events" to tell process "Keynote"
-    		keystroke "v" using command down
+    		set pasted to false
+    		repeat with nm in {"ペースト", "Paste"}
+    			try
+    				click menu item nm of menu 1 of (first menu bar item of menu bar 1 whose name is in {"編集", "Edit"})
+    				set pasted to true
+    				exit repeat
+    			end try
+    		end repeat
+    		if not pasted then keystroke "v" using command down
     	end tell
     	set n to 0
     	repeat 50 times
@@ -282,10 +291,8 @@ enum Keynote {
 
     /// クリップボードの Keynote オブジェクトを、一時書類に貼り直して PDF として取り出す
     static func vectorPDF() -> Outcome {
-        guard ensureAccessibility() else {
-            return .failed("アクセシビリティの許可が必要です"
-                + "（システム設定 > プライバシーとセキュリティ > アクセシビリティ で clip2pdf を許可してください）")
-        }
+        // 未許可なら OS の案内を出す。許可済みの判定が古いこともあるので、ここでは止めない
+        _ = ensureAccessibility()
         let dst = FileManager.default.temporaryDirectory
             .appendingPathComponent("clip2pdf-\(UUID().uuidString).pdf")
         defer { try? FileManager.default.removeItem(at: dst) }
@@ -306,7 +313,8 @@ enum Keynote {
         guard task.terminationStatus == 0, let data = try? Data(contentsOf: dst), !data.isEmpty else {
             let msg = (String(data: errData, encoding: .utf8) ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            if msg.contains("-1719") || msg.lowercased().contains("assistive") {
+            if msg.contains("-1719") || msg.contains("(1002)") || msg.contains("-1728")
+                || msg.lowercased().contains("assistive") {
                 return .failed("アクセシビリティの許可が必要です"
                     + "（システム設定 > プライバシーとセキュリティ > アクセシビリティ で clip2pdf を許可してください）")
             }
