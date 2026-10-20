@@ -21,8 +21,8 @@ clip2pdf は内容のある範囲まで切り詰め、図にぴったり合っ�
 ### ソースからビルドする（推奨）
 
 ```sh
-git clone https://github.com/sudahiroshi/key2pdf.git
-cd key2pdf
+git clone https://github.com/sudahiroshi/clip2pdf.git
+cd clip2pdf
 ./app/build.sh                              # → app/build/clip2pdf.app
 cp -R app/build/clip2pdf.app /Applications/
 open /Applications/clip2pdf.app
@@ -34,7 +34,7 @@ Xcode（または Command Line Tools）の `swiftc` だけでビルドできま�
 
 ### Releases から入れる
 
-[Releases](https://github.com/sudahiroshi/key2pdf/releases) の `clip2pdf.app.zip` を
+[Releases](https://github.com/sudahiroshi/clip2pdf/releases) の `clip2pdf.app.zip` を
 展開してアプリケーションフォルダへ入れます。**このアプリは署名していないため、
 初回だけ次のどちらかが必要です。**
 

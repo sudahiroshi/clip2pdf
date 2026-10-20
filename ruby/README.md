@@ -29,8 +29,8 @@ Node 版と同じオプションです。詳細は [key2pdf.md](../key2pdf.md) /
 PATH に入れるなら:
 
 ```sh
-ln -s ~/tako/key2pdf/ruby/key2pdf /usr/local/bin/key2pdf-rb
-ln -s ~/tako/key2pdf/ruby/pdftrim /usr/local/bin/pdftrim-rb
+ln -s "$PWD/ruby/key2pdf" /usr/local/bin/key2pdf-rb
+ln -s "$PWD/ruby/pdftrim" /usr/local/bin/pdftrim-rb
 ```
 
 ## 構成

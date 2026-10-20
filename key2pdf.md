@@ -32,8 +32,8 @@ Ruby + AppleScript 版（`ruby/key2pdf`）なら Node.js の代わりに Ruby 2.
 ## 導入
 
 ```sh
-cd ~/tako/key2pdf && npm install                      # 依存は pdf-lib だけ
-ln -s ~/tako/key2pdf/key2pdf /usr/local/bin/key2pdf   # お好みで PATH へ
+cd clip2pdf && npm install                      # 依存は pdf-lib だけ
+ln -s "$PWD/key2pdf" /usr/local/bin/key2pdf   # お好みで PATH へ
 ```
 
 ## 使い方

@@ -52,8 +52,8 @@ jobs:
             署名を気にせず使うなら、ソースからビルドするほうが簡単です。
 
             ```sh
-            git clone https://github.com/sudahiroshi/key2pdf.git
-            cd key2pdf && ./app/build.sh && cp -R app/build/clip2pdf.app /Applications/
+            git clone https://github.com/sudahiroshi/clip2pdf.git
+            cd clip2pdf && ./app/build.sh && cp -R app/build/clip2pdf.app /Applications/
             ```
 
       - name: ビルド結果を残す（タグ以外のとき）

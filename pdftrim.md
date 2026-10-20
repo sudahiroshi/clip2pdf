@@ -22,8 +22,8 @@ Ruby 版（`ruby/pdftrim`）なら Node.js の代わりに Ruby 2.6 以上と pd
 ## 導入
 
 ```sh
-cd ~/tako/key2pdf && npm install                      # 依存は pdf-lib だけ
-ln -s ~/tako/key2pdf/pdftrim /usr/local/bin/pdftrim   # お好みで PATH へ
+cd clip2pdf && npm install                      # 依存は pdf-lib だけ
+ln -s "$PWD/pdftrim" /usr/local/bin/pdftrim   # お好みで PATH へ
 ```
 
 ## 使い方
