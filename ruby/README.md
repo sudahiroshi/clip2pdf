@@ -3,6 +3,9 @@
 Node.js 版（リポジトリ直下の `key2pdf` / `pdftrim`）と**同じ使い方・同じ結果**になる
 Ruby 実装です。外部 gem を使いません。
 
+クリップボードからの取り込みやファイルのドロップは、アプリの
+[clip2pdf](../README.md) が担当します（こちらはコマンド版のみです）。
+
 | | Node.js 版 | Ruby 版 |
 | --- | --- | --- |
 | 実行 | `./key2pdf` / `./pdftrim` | `./ruby/key2pdf` / `./ruby/pdftrim` |
@@ -15,7 +18,7 @@ Ruby 実装です。外部 gem を使いません。
 
 ## 使い方
 
-Node 版と同じオプションです。詳細は[親 README](../README.md) を見てください。
+Node 版と同じオプションです。詳細は [key2pdf.md](../key2pdf.md) / [pdftrim.md](../pdftrim.md) を見てください。
 
 ```sh
 ./ruby/key2pdf figures.key              # → figures-01.pdf, figures-02.pdf …

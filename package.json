@@ -1,7 +1,7 @@
 {
   "name": "key2pdf",
   "version": "1.0.0",
-  "description": "Keynote のスライドから図を切り出す key2pdf と、PDF の余白を落とす pdftrim",
+  "description": "Keynote の図を余白なしの PDF にする clip2pdf（アプリ）と、同じ処理をするコマンド key2pdf / pdftrim",
   "bin": {
     "key2pdf": "./key2pdf",
     "pdftrim": "./pdftrim"
