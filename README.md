@@ -16,20 +16,32 @@ clip2pdf は内容のある範囲まで切り詰め、図にぴったり合っ�
 同じ処理をコマンドラインから行う `key2pdf` / `pdftrim` も同梱しています
 （[key2pdf.md](key2pdf.md) / [pdftrim.md](pdftrim.md)）。
 
-## ビルドと起動
+## 導入
+
+### ソースからビルドする（推奨）
 
 ```sh
-./app/build.sh                      # → app/build/clip2pdf.app
-open app/build/clip2pdf.app
+git clone https://github.com/sudahiroshi/key2pdf.git
+cd key2pdf
+./app/build.sh                              # → app/build/clip2pdf.app
+cp -R app/build/clip2pdf.app /Applications/
+open /Applications/clip2pdf.app
 ```
 
 Xcode（または Command Line Tools）の `swiftc` だけでビルドできます。
 **外部ライブラリは使いません**（Ghostscript も Node も Ruby も不要）。
-よく使うならアプリケーションフォルダへ移してください。
+自分でビルドしたアプリは Gatekeeper に止められないので、この方法が一番簡単です。
 
-```sh
-cp -R app/build/clip2pdf.app /Applications/
-```
+### Releases から入れる
+
+[Releases](https://github.com/sudahiroshi/key2pdf/releases) の `clip2pdf.app.zip` を
+展開してアプリケーションフォルダへ入れます。**このアプリは署名していないため、
+初回だけ次のどちらかが必要です。**
+
+- 一度開こうとしてから、システム設定 > プライバシーとセキュリティ > 「このまま開く」
+- またはターミナルで `xattr -dr com.apple.quarantine /Applications/clip2pdf.app`
+
+配布する側の手順は [RELEASING.md](RELEASING.md) にまとめてあります。
 
 ## 使い方
 
@@ -101,7 +113,8 @@ TeX の図なら **ベクタ** を、色の付いた背景に重ねるなど透�
   「設定を開く」ボタンが出ます。許可しないなら「取り出し: 画像」を選ぶか、
   `.key` ファイルをドロップしてください。
 
-アプリを作り直すとアドホック署名が変わるため、許可を取り直す必要が出る場合があります。
+アプリを作り直すとアドホック署名が変わるため、許可を取り直す必要が出る場合があります
+（Developer ID で署名すれば更新をまたいで維持されます。[RELEASING.md](RELEASING.md) 参照）。
 
 ## 切り抜きの仕組み
 
@@ -153,6 +166,10 @@ $BIN --trim in.pdf out.pdf --no-trim             # 切り抜かずに PDF 化だ
   （表示・印刷はされません）。
 - 署名はアドホックです。初回起動時に macOS が警告を出す場合は、
   システム設定 > プライバシーとセキュリティ から開くことを許可してください。
+
+## ライセンス
+
+MIT License（[LICENSE](LICENSE)）
 
 ## テスト
 

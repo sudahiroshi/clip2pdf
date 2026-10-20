@@ -1,0 +1,64 @@
+# タグを push すると macOS ランナーでアプリをビルドし、Releases に添付する。
+# 署名はアドホックのままなので、ダウンロードした人は「開き方」の案内が必要
+# （README の「Releases から入れる」を参照）。
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: アプリをビルド
+        run: ./app/build.sh
+
+      - name: 出来上がりを確認
+        run: |
+          BIN=app/build/clip2pdf.app/Contents/MacOS/clip2pdf
+          test -x "$BIN"
+          codesign -v app/build/clip2pdf.app
+          # 引数が足りないときは使い方を出して終わる（起動できていることの確認）
+          "$BIN" --trim 2>&1 | grep -q "使い方"
+
+      - name: zip にまとめる
+        run: ditto -c -k --keepParent app/build/clip2pdf.app clip2pdf.app.zip
+
+      - name: Releases に添付
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: clip2pdf.app.zip
+          body: |
+            ## インストール
+
+            1. `clip2pdf.app.zip` を展開して `clip2pdf.app` をアプリケーションフォルダへ
+            2. **このアプリは署名していないため、そのままでは開けません。**
+               初回だけ次のどちらかを行ってください。
+               - 一度開こうとしてから、システム設定 > プライバシーとセキュリティ >
+                 「このまま開く」を押す
+               - またはターミナルで
+                 `xattr -dr com.apple.quarantine /Applications/clip2pdf.app`
+            3. 初回の変換時に Keynote を操作する許可を求められます
+
+            署名を気にせず使うなら、ソースからビルドするほうが簡単です。
+
+            ```sh
+            git clone https://github.com/sudahiroshi/key2pdf.git
+            cd key2pdf && ./app/build.sh && cp -R app/build/clip2pdf.app /Applications/
+            ```
+
+      - name: ビルド結果を残す（タグ以外のとき）
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: clip2pdf-app
+          path: clip2pdf.app.zip
