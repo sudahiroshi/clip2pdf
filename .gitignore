@@ -1,3 +1,5 @@
 .DS_Store
 tests/tmp/
 node_modules/
+tests/setclip
+app/build/

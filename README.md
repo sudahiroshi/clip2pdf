@@ -6,10 +6,18 @@
 | --- | --- |
 | `key2pdf` | Keynote の `.key` から、スライドごとに**図の部分だけ**を切り出した PDF を作る |
 | `pdftrim` | できあいの **PDF の余白を落として**、内容にぴったりのページサイズにする |
+| `clip2pdf`（アプリ） | Keynote で図を ⌘C → アプリで **⌘V すると余白なしの PDF として保存**（[app/README.md](app/README.md)） |
 
 切り抜きの中身は `lib/crop.js` で共通です。
 同じものの **Ruby + AppleScript 版**が `ruby/` にあります（[ruby/README.md](ruby/README.md)）。
 使い方・出力は Node 版と同じで、gem を使いません。
+
+`.key` ファイルを経由せず、コピー＆ペーストで1枚ずつ書き出したいときは
+`clip2pdf` アプリが手軽です（Swift 製・外部依存なし）。
+
+```sh
+./app/build.sh && open app/build/clip2pdf.app
+```
 
 ## 必要なもの
 
@@ -142,16 +150,15 @@ pdftrim --noise 3 --tolerance 20 scan.pdf   # スキャンの地色とゴミを�
 ## テスト
 
 ```sh
-npm test          # = ./tests/run_tests.sh
+npm test                             # = ./tests/run_tests.sh
+./tests/run_tests.sh --with-keynote  # Keynote での書き出しも含める
+./tests/run_tests.sh --with-clipboard  # クリップボード経由も含める（中身を書き換えます）
 ```
 
 既知の寸法の PDF を `pdflatex` で作り、**Node 版と Ruby 版の両方**について
 切り抜き結果の実寸・`--margin`・`--slide` / `--pages`・`--merge` / `--split` / `--uniform`・
 `--noise`・エラー処理・`\includegraphics` の通りを検証します（Keynote は起動しません）。
 
-Keynote からの書き出しを含む通し確認も行うなら、`--with-keynote` を付けます
-（Keynote が起動し、サンプル書類を作って変換まで通します）。
-
-```sh
-./tests/run_tests.sh --with-keynote
-```
+`--with-keynote` では Keynote が起動し、サンプル書類を作って変換まで通します。
+`--with-clipboard` は clip2pdf のクリップボード経路を検証するため、
+**実行中にクリップボードの中身を書き換えます**。

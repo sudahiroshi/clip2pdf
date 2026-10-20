@@ -5,7 +5,13 @@
 # --with-keynote を付けると Keynote での書き出し（①段）を含む通し確認も行う。
 set -u
 WITH_KEYNOTE=0
-[ "${1:-}" = "--with-keynote" ] && WITH_KEYNOTE=1
+WITH_CLIPBOARD=0
+for a in "$@"; do
+  case "$a" in
+    --with-keynote) WITH_KEYNOTE=1 ;;
+    --with-clipboard) WITH_CLIPBOARD=1 ;;  # クリップボードの中身を書き換えるので既定では走らせない
+  esac
+done
 
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
@@ -202,8 +208,46 @@ TEX
   fi
 }
 
+# ---------------------------------------------------------------- clip2pdf（アプリ）
+
+# アプリ本体の切り抜きは CLI と同じ結果になるはず。GUI は出さずに検証する。
+clip2pdf_suite() {
+  LABEL="clip2pdf"
+  local BIN="$ROOT/app/build/clip2pdf.app/Contents/MacOS/clip2pdf"
+  local W="$TMP/app"
+  mkdir -p "$W"
+  if [ ! -x "$BIN" ]; then
+    echo "[clip2pdf] ビルドしています…"
+    if ! "$ROOT/app/build.sh" >/dev/null 2>&1; then
+      ng "clip2pdf のビルドに失敗した"; return
+    fi
+  fi
+  ok "clip2pdf をビルドできている"
+
+  echo "[clip2pdf] 切り抜き（CLI 版と同じ結果になるか）"
+  "$BIN" --trim "$TMP/fixture.pdf" "$W/trim.pdf" 2>/dev/null
+  size_is "1ページ目が CLI 版と同じ寸法" "$W/trim.pdf" 0 241.44 121.44 0.01
+  size_is "2ページ目が CLI 版と同じ寸法" "$W/trim.pdf" 1 101.28 301.44 0.01
+  "$BIN" --trim "$TMP/fixture.pdf" "$W/margin.pdf" --margin 5 2>/dev/null
+  size_is "--margin 5 で縦横とも 10pt 大きい" "$W/margin.pdf" 0 251.44 131.44 0.01
+  "$BIN" --trim "$TMP/fixture.pdf" "$W/raw.pdf" --no-trim 2>/dev/null
+  size_is "--no-trim は切り抜かない" "$W/raw.pdf" 0 720 540 0.5
+  fails "読めない入力は失敗する" "$BIN" --trim "$TMP/nope.pdf" "$W/x.pdf"
+
+  if [ "$WITH_CLIPBOARD" = 1 ]; then
+    echo "[clip2pdf] クリップボード経由（クリップボードの中身を書き換えます）"
+    if "$ROOT/tests/setclip" "$TMP/fixture.pdf" >/dev/null 2>&1 \
+       && "$BIN" --clipboard "$W/clip.pdf" 2>/dev/null; then
+      size_is "クリップボードの図を切り抜いて保存できる" "$W/clip.pdf" 0 241.44 121.44 0.01
+    else
+      ng "クリップボード経由の変換に失敗した"
+    fi
+  fi
+}
+
 suite "Node" "$ROOT/key2pdf" "$ROOT/pdftrim" "$TMP/node"
 suite "Ruby" "$ROOT/ruby/key2pdf" "$ROOT/ruby/pdftrim" "$TMP/ruby"
+clip2pdf_suite
 
 echo
 printf '成功 %d / 失敗 %d\n' "$PASS" "$FAIL"
