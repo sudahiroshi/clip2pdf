@@ -35,11 +35,8 @@ Xcode（または Command Line Tools）の `swiftc` だけでビルドできま�
 ### Releases から入れる
 
 [Releases](https://github.com/sudahiroshi/clip2pdf/releases) の `clip2pdf.app.zip` を
-展開してアプリケーションフォルダへ入れます。**このアプリは署名していないため、
-初回だけ次のどちらかが必要です。**
-
-- 一度開こうとしてから、システム設定 > プライバシーとセキュリティ > 「このまま開く」
-- またはターミナルで `xattr -dr com.apple.quarantine /Applications/clip2pdf.app`
+展開してアプリケーションフォルダへ入れるだけです。Developer ID で署名し Apple の
+公証を受けているので、**ダウンロードしてそのまま開けます**。
 
 配布する側の手順は [RELEASING.md](RELEASING.md) にまとめてあります。
 

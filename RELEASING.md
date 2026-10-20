@@ -16,29 +16,30 @@ Gatekeeper に止められません。未署名のまま配るなら一番トラ
 
 ## 2. Releases にビルド済みアプリを置く
 
-`.github/workflows/release.yml` が入っています。タグを push すると macOS ランナーで
-ビルドし、`clip2pdf.app.zip` を Releases に添付します。
+**手元で署名・公証した zip を添付します。** GitHub のランナーには証明書が無く、
+そこでビルドすると未署名になってしまうためです（`.github/workflows/build.yml` は
+ビルドが通るかを確かめるだけで、Releases には何も載せません）。
 
 ```sh
-git tag v1.0.0
-git push origin v1.0.0
+./app/sign.sh                       # 署名 → 公証 → staple → app/build/clip2pdf.app.zip
+gh release create v1.0.0 app/build/clip2pdf.app.zip --title "clip2pdf v1.0.0" --notes "..."
 ```
 
-手元で作って手で添付する場合は次のとおりです。`.app` は `zip` ではなく `ditto` で
-固めてください（属性やシンボリックリンクが壊れないようにするため）。
+公証まで通っていれば、**受け取った人はダウンロードして開くだけ**です。警告も
+`xattr` での解除も要りません。確かめるには、ダウンロードと同じ印を付けて判定させます。
 
 ```sh
-./app/build.sh
-ditto -c -k --keepParent app/build/clip2pdf.app clip2pdf.app.zip
-gh release create v1.0.0 clip2pdf.app.zip --title "clip2pdf v1.0.0" --notes-file -
+ditto -x -k app/build/clip2pdf.app.zip /tmp/qtest/
+xattr -w com.apple.quarantine "0083;00000000;Safari;00000000-0000-0000-0000-000000000000" /tmp/qtest/clip2pdf.app
+spctl --assess --type execute -vvv /tmp/qtest/clip2pdf.app   # → accepted
 ```
 
-**受け取った人は次のどちらかが必要です**（未署名のため）。
+署名せずに配る場合（`./app/build.sh` のアドホック署名のまま）は、受け取った人に
+次のどちらかをしてもらう必要があります。macOS 15 以降は「右クリック → 開く」では
+回避できません。
 
 - 一度開こうとしてから、システム設定 > プライバシーとセキュリティ > 「このまま開く」
 - または `xattr -dr com.apple.quarantine /Applications/clip2pdf.app`
-
-macOS 15 以降は「右クリック → 開く」では回避できなくなっています。
 
 また、**アドホック署名はビルドのたびに変わる**ため、アプリを更新すると
 オートメーション／アクセシビリティの許可を取り直すことになります。

@@ -1,0 +1,40 @@
+# push / PR のたびにアプリがビルドできることを確かめる。
+# Releases に載せる zip は、署名と公証が必要なので手元で ./app/sign.sh を使って作る
+# （GitHub のランナーには証明書が無く、ここで作ると未署名になってしまうため）。
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: アプリをビルド
+        run: ./app/build.sh
+
+      - name: 出来上がりを確認
+        run: |
+          BIN=app/build/clip2pdf.app/Contents/MacOS/clip2pdf
+          test -x "$BIN"
+          codesign -v app/build/clip2pdf.app
+          # 引数が足りないときは使い方を出して終わる（起動できていることの確認）
+          "$BIN" --trim 2>&1 | grep -q "使い方"
+
+      - name: 動作を確認（PDF の余白を落とせるか）
+        run: |
+          BIN=app/build/clip2pdf.app/Contents/MacOS/clip2pdf
+          # 200x200pt のページに置いた 100x40pt の四角が、その実寸まで縮むか
+          "$BIN" --trim tests/fixtures/box.pdf /tmp/box-crop.pdf
+          python3 -c 'import re,sys; d=open("/tmp/box-crop.pdf","rb").read(); bs=[[float(v) for v in m.split()] for m in re.findall(rb"/MediaBox\s*\[([^\]]*)\]",d)]; sizes=[(b[2]-b[0],b[3]-b[1]) for b in bs]; print("ページ矩形:", sizes); sys.exit(0 if any(99<w<103 and 39<h<43 for w,h in sizes) else 1)'
+
+      - name: ビルド結果を残す
+        uses: actions/upload-artifact@v4
+        with:
+          name: clip2pdf-app-unsigned
+          path: app/build/clip2pdf.app
