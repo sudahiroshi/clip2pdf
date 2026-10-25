@@ -268,6 +268,10 @@ clip2pdf_suite() {
   size_is "--no-trim は切り抜かない" "$W/raw.pdf" 0 720 540 0.5
   fails "読めない入力は失敗する" "$BIN" --trim "$TMP/nope.pdf" "$W/x.pdf"
 
+  # NSImageView のように既定でドラッグを受ける部品が前面にあると、ウィンドウに
+  # 落としても無反応になる。登録状態を検査して取りこぼしを防ぐ
+  check "ウィンドウがファイルのドロップを受け付ける" "$BIN" --selftest-drop
+
   echo "[clip2pdf] ファイルの変換（key2pdf / pdftrim 相当）"
   mkdir -p "$W/conv"
   "$BIN" --convert "$TMP/fixture.pdf" "$W/conv" >/dev/null 2>&1

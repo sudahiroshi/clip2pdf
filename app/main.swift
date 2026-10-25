@@ -450,10 +450,10 @@ enum Saver {
 
 // ---------------------------------------------------------------- ドロップを受けるプレビュー
 
+/// プレビュー表示（市松模様＋画像＋案内文）。ドロップの受け口は DropContainer 側。
 final class DropView: NSView {
-    var onDrop: (() -> Void)?
-    var onFiles: (([URL]) -> Void)?
     var showsCheckerboard = false { didSet { needsDisplay = true } }
+    var highlighted = false { didSet { updateColors() } }
     let imageView = NSImageView()
     let placeholder = NSTextField(labelWithString:
         "ここに ⌘V でペースト\nKeynote ファイルや PDF をドロップしても可")
@@ -479,7 +479,10 @@ final class DropView: NSView {
             placeholder.centerXAnchor.constraint(equalTo: centerXAnchor),
             placeholder.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
-        registerForDraggedTypes([NSPasteboard.PasteboardType("com.adobe.pdf"), .tiff, .png, .fileURL])
+        // NSImageView は既定で PDF や画像のドラッグを受け付ける destination になっていて、
+        // プレビュー全面を覆うためドロップを横取りして拒否してしまう。外しておく。
+        imageView.unregisterDraggedTypes()
+        placeholder.unregisterDraggedTypes()
         updateColors()
     }
 
@@ -506,7 +509,8 @@ final class DropView: NSView {
     }
 
     private func updateColors() {
-        layer?.borderColor = NSColor.separatorColor.cgColor
+        layer?.borderWidth = highlighted ? 2 : 1
+        layer?.borderColor = (highlighted ? NSColor.controlAccentColor : NSColor.separatorColor).cgColor
         layer?.backgroundColor = NSColor.textBackgroundColor.cgColor
     }
 
@@ -515,20 +519,49 @@ final class DropView: NSView {
         placeholder.isHidden = (image != nil)
     }
 
-    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { .copy }
+}
+
+/// ウィンドウ全面でドロップを受ける入れ物。プレビューの外に落としても効くようにする。
+final class DropContainer: NSView {
+    var onFiles: (([URL]) -> Void)?
+    var onPasteboard: (() -> Void)?
+    var onHighlight: ((Bool) -> Void)?
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        registerForDraggedTypes([.fileURL, NSPasteboard.PasteboardType("com.adobe.pdf"),
+                                 .tiff, .png])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func urls(from sender: NSDraggingInfo) -> [URL] {
+        let opts: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
+        return (sender.draggingPasteboard.readObjects(forClasses: [NSURL.self],
+                                                      options: opts) as? [URL]) ?? []
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        onHighlight?(true)
+        return .copy
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) { onHighlight?(false) }
+    override func draggingEnded(_ sender: NSDraggingInfo) { onHighlight?(false) }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        onHighlight?(false)
         // ファイルが落ちてきたらファイルとして開く（.key / .pdf / 画像）
-        if let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self],
-                                                           options: nil) as? [URL], !urls.isEmpty {
-            onFiles?(urls)
+        let files = urls(from: sender)
+        if !files.isEmpty {
+            onFiles?(files)
             return true
         }
         // それ以外は一度クリップボードに移してから、ペーストと同じ経路で扱う
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.writeObjects(sender.draggingPasteboard.pasteboardItems ?? [])
-        onDrop?()
+        onPasteboard?()
         return true
     }
 }
@@ -645,8 +678,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         prefixField.widthAnchor.constraint(equalToConstant: 120).isActive = true
         drop.translatesAutoresizingMaskIntoConstraints = false
         drop.heightAnchor.constraint(equalToConstant: 260).isActive = true
-        drop.onDrop = { [weak self] in self?.paste() }
-        drop.onFiles = { [weak self] urls in self?.openFiles(urls) }
+
         statusLabel.lineBreakMode = .byTruncatingMiddle
         statusLabel.textColor = .secondaryLabelColor
         settingsButton.target = self
@@ -692,8 +724,12 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
                           backing: .buffered, defer: false)
         window.title = "clip2pdf"
         window.delegate = self
-        window.contentView = NSView()
-        window.contentView!.addSubview(stack)
+        let container = DropContainer()
+        container.onFiles = { [weak self] urls in self?.openFiles(urls) }
+        container.onPasteboard = { [weak self] in self?.paste() }
+        container.onHighlight = { [weak self] on in self?.drop.highlighted = on }
+        window.contentView = container
+        container.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.topAnchor.constraint(equalTo: window.contentView!.topAnchor),
             stack.bottomAnchor.constraint(equalTo: window.contentView!.bottomAnchor),
@@ -705,6 +741,20 @@ final class Controller: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.makeKeyAndOrderFront(nil)
     }
 
+
+    /// ドロップの受け口が正しく登録されているかを返す（--selftest-drop 用）。
+    /// NSImageView のように既定でドラッグを受ける部品が前面にあると、
+    /// ウィンドウに落としても無反応になるため、ここで検査しておく。
+    func dropDiagnostics() -> (ok: Bool, text: String) {
+        let container = window.contentView?.registeredDraggedTypes.map { $0.rawValue } ?? []
+        let onPreview = drop.registeredDraggedTypes.count
+        let onImage = drop.imageView.registeredDraggedTypes.count
+        let acceptsFiles = container.contains(NSPasteboard.PasteboardType.fileURL.rawValue)
+        let text = "ウィンドウが受ける型: \(container.count) 件"
+            + "（ファイル: \(acceptsFiles ? "あり" : "なし")）"
+            + " / 前面の部品が横取りする型: プレビュー \(onPreview) 件・画像 \(onImage) 件"
+        return (acceptsFiles && onPreview == 0 && onImage == 0, text)
+    }
 
     // MARK: ファイルを開く
 
@@ -1060,6 +1110,19 @@ func runHeadless(_ args: [String]) -> Int32 {
 }
 
 let args = CommandLine.arguments
+
+// 画面を作ってドロップの受け口だけ検査する（回帰防止）
+if args.contains("--selftest-drop") {
+    let app = NSApplication.shared
+    app.setActivationPolicy(.prohibited)
+    let controller = Controller()
+    app.delegate = controller
+    controller.applicationDidFinishLaunching(Notification(name: Notification.Name("selftest")))
+    let result = controller.dropDiagnostics()
+    print(result.text)
+    exit(result.ok ? 0 : 1)
+}
+
 if args.contains("--trim") || args.contains("--clipboard") || args.contains("--convert") {
     exit(runHeadless(args))
 }
